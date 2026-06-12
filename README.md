@@ -31,7 +31,14 @@
 
 ## ⏰ 触发时间
 
-每天北京时间 **08:00 / 20:00** 自动运行，也可在 Actions 页面手动触发。
+默认不设定自动触发时间，请在 `.github/workflows/xserver_game_renew.yml` 中自行修改 cron：
+
+```yaml
+schedule:
+  - cron: "0 0,12 * * *"  # UTC 时间，对应北京时间 08:00 / 20:00
+```
+
+也可在 Actions 页面手动触发。
 
 ---
 
