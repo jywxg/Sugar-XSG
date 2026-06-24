@@ -2,6 +2,9 @@ name: XServer-Game-Renew
 on:
   workflow_dispatch:
 
+permissions:
+  actions: write
+
 jobs:
   renew:
     runs-on: ubuntu-latest
@@ -10,14 +13,6 @@ jobs:
     steps:
       - name: 📥 拉取仓库
         uses: actions/checkout@v4
-
-      - name: 🧹 清理旧工作流运行记录
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh run list --limit 100 --json databaseId,status -q '.[] | select(.status=="completed") | .databaseId' | while read id; do
-            gh run delete "$id" --yes || true
-          done
 
       - name: 🐍 安装 Python 依赖
         run: pip install requests --quiet
@@ -43,3 +38,21 @@ jobs:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT }}
         run: python3 xserver_game_renew.py
+
+      - name: 🧹 清理旧工作流运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "开始清理旧的 GitHub Actions 运行记录..."
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.status=="completed") | .id' | while read id
+          do
+            echo "删除运行记录: $id"
+            gh api --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/actions/runs/$id" || true
+          done
+          echo "清理完成"
