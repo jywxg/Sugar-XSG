@@ -13,15 +13,20 @@ if not XSERVER_GAME_ACCOUNT:
     print("❌ 请设置 GitHub Secret: XSERVER_GAME_ACCOUNT（格式: 自定义名称,email,password）")
     sys.exit(1)
 
-_parts = XSERVER_GAME_ACCOUNT.split(",", 2)
-if len(_parts) < 3:
-    print("❌ XSERVER_GAME_ACCOUNT 格式错误，应为: 自定义名称,email,password")
-    sys.exit(1)
+ACCOUNTS = []
+for item in re.split(r"[\n;]+", XSERVER_GAME_ACCOUNT.strip()):
+    item = item.strip()
+    if not item:
+        continue
+    parts = item.split(",", 2)
+    if len(parts) < 3:
+        print("❌ XSERVER_GAME_ACCOUNT 格式错误，应为: 自定义名称,email,password")
+        sys.exit(1)
+    ACCOUNTS.append({"name": parts[0].strip(), "email": parts[1].strip(), "password": parts[2].strip()})
 
-SERVER_NAME = _parts[0].strip()
-GH_EMAIL    = _parts[1].strip()
-GH_PASSWORD = _parts[2].strip()
-GH_EMAIL_MASKED = f"***@{GH_EMAIL.split('@')[1]}" if "@" in GH_EMAIL else "***"
+if not ACCOUNTS:
+    print("❌ 没有有效账号")
+    sys.exit(1)
 
 BASE_URL         = "https://secure.xserver.ne.jp"
 LOGIN_PAGE       = f"{BASE_URL}/xapanel/login/xserver/?request_page=xserver%2Findex"
@@ -129,8 +134,9 @@ def finish(success: bool, result: str, deadline: str):
     sys.exit(0 if success else 1)
 
 
-def login() -> requests.Session:
-    log(f"🔑 正在登录... 账号: {GH_EMAIL_MASKED}")
+def login(email, password) -> requests.Session:
+    email_masked = re.sub(r"(.{2}).*(@.*)", r"\1***\2", email)
+    log(f"🔑 正在登录... 账号: {email_masked}")
     session = requests.Session()
 
     try:
@@ -158,8 +164,8 @@ def login() -> requests.Session:
                 "request_page": "xserver/index",
                 "site": "",
                 "uniqid": uniqid,
-                "memberid": GH_EMAIL,
-                "user_password": GH_PASSWORD,
+                "memberid": email,
+                "user_password": password,
                 "service_login": "xserver",
                 "action_user_login": "%A5%ED%A5%B0%A5%A4%A5%F3%A4%B9%A4%EB",
             },
@@ -375,7 +381,9 @@ def do_renew(session: requests.Session) -> bool:
     return True
 
 
-def main():
+def run_account(account):
+    global SERVER_NAME
+    SERVER_NAME = account["name"]
     log(f"{'🛡️ 使用代理模式' if PROXIES else '🌐 直连模式'}")
     divider(f"{SCRIPT_NAME} starts")
     log(f"🕐 运行时间: {now_str()}")
@@ -390,7 +398,7 @@ def main():
     except Exception as e:
         log(f"⚠️ 出口 IP 检测失败: {e}")
 
-    session = login()
+    session = login(account["email"], account["password"])
     jump_to_xmgame(session)
 
     log("📋 读取服务器信息...")
@@ -432,6 +440,20 @@ def main():
     else:
         log("❌ 续期失败，时间未变化")
         finish(False, "❌ 续期失败！", dl_after or dl_before)
+
+
+def main():
+    failed = 0
+    for account in ACCOUNTS:
+        try:
+            run_account(account)
+        except SystemExit as e:
+            if e.code != 0:
+                failed += 1
+        except Exception as e:
+            failed += 1
+            log(f"❌ 账号 {account['name']} 异常: {e}")
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":
