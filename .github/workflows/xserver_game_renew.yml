@@ -11,6 +11,14 @@ jobs:
       - name: 📥 拉取仓库
         uses: actions/checkout@v4
 
+      - name: 🧹 清理旧工作流运行记录
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --limit 100 --json databaseId,status -q '.[] | select(.status=="completed") | .databaseId' | while read id; do
+            gh run delete "$id" --yes || true
+          done
+
       - name: 🐍 安装 Python 依赖
         run: pip install requests --quiet
 
