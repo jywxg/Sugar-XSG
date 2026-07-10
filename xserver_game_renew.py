@@ -42,8 +42,8 @@ IP_CHECK_URL     = "https://api.ipify.org?format=json"
 
 RENEW_THRESHOLD_HOURS = 16
 
-GOST_PROXY = os.environ.get("GOST_PROXY", "")
-PROXIES = {"http": "http://127.0.0.1:1080", "https": "http://127.0.0.1:1080"} if GOST_PROXY else {}
+NODE_LINK = os.environ.get("NODE_LINK", "")
+PROXIES = {"http": "http://127.0.0.1:1080", "https": "http://127.0.0.1:1080"} if NODE_LINK else {}
 
 TG_BOT = os.environ.get("TG_BOT", "")
 
