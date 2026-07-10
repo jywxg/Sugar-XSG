@@ -444,12 +444,8 @@ fi
 
 echo "[INFO] 测试代理连接..."
 for i in {1..3}; do
-  # 通过代理请求 ipinfo 接口获取 JSON 格式的 IP 信息
-  ip_info=$(curl -x socks5://127.0.0.1:1080 -s --max-time 15 https://ipinfo.io/json || echo "")
-  
-  # 验证是否成功返回并包含真实的 ip 字段
+  ip_info=$(curl -x socks5://127.0.0.1:1080 -s --max-time 15 https://ipinfo.io/json || true)
   if [ -n "$ip_info" ] && echo "$ip_info" | jq -e '.ip' > /dev/null 2>&1; then
-    # 使用 // "Unknown" 容错，防止提取出 null 值导致显示不好看
     ip_addr=$(echo "$ip_info" | jq -r '.ip // "Unknown"')
     country=$(echo "$ip_info" | jq -r '.country // "Unknown"')
     
