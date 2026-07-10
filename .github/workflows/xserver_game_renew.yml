@@ -33,8 +33,7 @@ jobs:
           TG_BOT: ${{ secrets.TG_BOT }}
         run: python3 xserver_game_renew.py
 
-      # ⏱️ 提交 time.txt 到仓库(用于解决60天无文件变化的限制)
-      - name: 更新运行记录
+      - name: ⏱️ 更新运行记录
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
