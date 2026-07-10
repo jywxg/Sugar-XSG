@@ -38,7 +38,7 @@ EXTEND_URL       = f"{BASE_URL}/xmgame/game/freeplan/extend/index"
 RENEW_URL        = f"{BASE_URL}/xmgame/game/freeplan/extend/input"
 CONF_URL         = f"{BASE_URL}/xmgame/game/freeplan/extend/conf"
 DO_URL           = f"{BASE_URL}/xmgame/game/freeplan/extend/do"
-IP_CHECK_URL     = "https://api.ipify.org?format=json"
+IP_CHECK_URL     = "https://ipinfo.io/json"
 
 RENEW_THRESHOLD_HOURS = 16
 
