@@ -6,6 +6,7 @@ on:
 
 permissions:
   actions: write
+  contents: write  # 允许工作流向仓库提交和推送代码
 
 jobs:
   renew:
@@ -24,13 +25,37 @@ jobs:
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+          bash setup_proxy.sh
 
       - name: 🔧 执行续期
         env:
           XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }}
           TG_BOT: ${{ secrets.TG_BOT }}
         run: python3 xserver_game_renew.py
+
+      # ⏱️ 提交 time.txt 到仓库(用于解决60天无文件变化的限制)
+      - name: 更新运行记录
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ ! -f time.txt ]; then
+            echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          else
+            echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          fi
+
+          git add time.txt
+
+          if git diff --cached --quiet; then
+            echo "无变化，无需提交"
+          else
+            git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
 
       - name: 🧹 清理旧工作流运行记录
         if: always()
