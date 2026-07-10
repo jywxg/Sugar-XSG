@@ -42,10 +42,6 @@ IP_CHECK_URL     = "https://api.ipify.org?format=json"
 
 RENEW_THRESHOLD_HOURS = 16
 
-# ---------------- 代理配置（已还原为原版极简结构） ----------------
-# 因为 GitHub Actions 步骤间不共享环境变量，这里将默认值直接设为 "1" 强制读取。
-# sing-box 的默认本地 HTTP 代理端口通常是 2080（原版 GOST 是 8080）。
-# 如果后续运行时在出口 IP 检测时报错“连接被拒绝”，你可以尝试把代码里的 2080 改成 8080 或 2081。
 USE_PROXY = os.environ.get("USE_PROXY", "1")
 PROXIES = {"http": "http://127.0.0.1:2080", "https": "http://127.0.0.1:2080"} if USE_PROXY else None
 # ------------------------------------------------------------------
