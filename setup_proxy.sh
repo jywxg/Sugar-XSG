@@ -450,8 +450,7 @@ for i in {1..3}; do
     ip_addr=$(echo "$ip_info" | jq -r '.ip // "Unknown"')
     country=$(echo "$ip_info" | jq -r '.country // "Unknown"')
     
-    echo "[INFO] ✅ 代理连接成功"
-    echo "[INFO] 📍 代理 IP: $ip_addr | 🌍 国家: $country"
+    echo "[INFO] ✅ 代理连接成功 | 📍 IP: $ip_addr | 🌍 国家: $country"
     
     echo "IS_PROXY=true" >> $GITHUB_ENV
     echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
