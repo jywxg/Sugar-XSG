@@ -42,28 +42,13 @@ IP_CHECK_URL     = "https://api.ipify.org?format=json"
 
 RENEW_THRESHOLD_HOURS = 16
 
-# 🔍 自动检测并加载系统代理环境变量（完美适配 sing-box 脚本设置的代理）
-PROXIES = {}
-_env_http = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
-_env_https = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
-_env_all = os.environ.get("all_proxy") or os.environ.get("ALL_PROXY")
-
-if _env_http:
-    PROXIES["http"] = _env_http
-if _env_https:
-    PROXIES["https"] = _env_https
-
-if _env_all:
-    if "http" not in PROXIES:
-        PROXIES["http"] = _env_all
-    if "https" not in PROXIES:
-        PROXIES["https"] = _env_all
-
-# 如果没有检测到任何代理变量，设为 None 允许直连
-# 注意：绝不能设为空字典 {}，因为 requests 传入 proxies={} 会显式禁用并忽略系统代理环境变量
-HAS_PROXY = len(PROXIES) > 0
-if not HAS_PROXY:
-    PROXIES = None
+# ---------------- 代理配置（已还原为原版极简结构） ----------------
+# 因为 GitHub Actions 步骤间不共享环境变量，这里将默认值直接设为 "1" 强制读取。
+# sing-box 的默认本地 HTTP 代理端口通常是 2080（原版 GOST 是 8080）。
+# 如果后续运行时在出口 IP 检测时报错“连接被拒绝”，你可以尝试把代码里的 2080 改成 8080 或 2081。
+USE_PROXY = os.environ.get("USE_PROXY", "1")
+PROXIES = {"http": "http://127.0.0.1:2080", "https": "http://127.0.0.1:2080"} if USE_PROXY else None
+# ------------------------------------------------------------------
 
 TG_BOT = os.environ.get("TG_BOT", "")
 
@@ -404,7 +389,7 @@ def do_renew(session: requests.Session) -> bool:
 def run_account(account):
     global SERVER_NAME
     SERVER_NAME = account["name"]
-    log(f"{'🛡️ 使用代理模式' if HAS_PROXY else '🌐 直连模式'}")
+    log(f"{'🛡️ 使用代理模式' if PROXIES else '🌐 直连模式'}")
     divider(f"{SCRIPT_NAME} starts")
     log(f"🕐 运行时间: {now_str()}")
     log(f"🖥 服务器: {SERVER_NAME}")
