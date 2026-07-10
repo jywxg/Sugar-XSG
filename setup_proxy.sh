@@ -445,13 +445,13 @@ fi
 echo "[INFO] 测试代理连接..."
 for i in {1..3}; do
   ip_info=$(curl -x socks5://127.0.0.1:1080 -s --max-time 15 https://ipinfo.io/json || true)
+  
   if [ -n "$ip_info" ] && echo "$ip_info" | jq -e '.ip' > /dev/null 2>&1; then
     ip_addr=$(echo "$ip_info" | jq -r '.ip // "Unknown"')
     country=$(echo "$ip_info" | jq -r '.country // "Unknown"')
     
     echo "[INFO] ✅ 代理连接成功"
-    echo "[INFO] 📍 代理 IP 地址: $ip_addr"
-    echo "[INFO] 🌍 代理所在国家: $country"
+    echo "[INFO] 📍 代理 IP: $ip_addr | 🌍 国家: $country"
     
     echo "IS_PROXY=true" >> $GITHUB_ENV
     echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
