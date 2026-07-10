@@ -42,9 +42,7 @@ IP_CHECK_URL     = "https://ipinfo.io/json"
 
 RENEW_THRESHOLD_HOURS = 16
 
-# 读取代理节点配置
 NODE_LINK = os.environ.get("NODE_LINK", "")
-# 根据 setup_proxy.sh 的配置，HTTP 代理端口为 1081
 PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"} if NODE_LINK else {}
 
 TG_BOT = os.environ.get("TG_BOT", "")
@@ -391,16 +389,16 @@ def run_account(account):
     log(f"🕐 运行时间: {now_str()}")
     log(f"🖥 服务器: {SERVER_NAME}")
 
-log("🌐 验证出口 IP...")
-try:
-    resp = requests.get(IP_CHECK_URL, timeout=10, proxies=PROXIES)
-    ip_data = resp.json()
-    raw_ip = ip_data.get("ip", "未知")
-    country = ip_data.get("country", "未知") # 获取国家代码
-    masked = re.sub(r'\.\d+$', '.**', raw_ip)
-    log(f"✅ 出口 IP 确认：{masked} ({country})") # 打印时附加国家信息
-except Exception as e:
-    log(f"⚠️ 出口 IP 检测失败: {e}")
+    log("🌐 验证出口 IP...")
+    try:
+        resp = requests.get(IP_CHECK_URL, timeout=10, proxies=PROXIES)
+        ip_data = resp.json()
+        raw_ip = ip_data.get("ip", "未知")
+        country = ip_data.get("country", "未知")
+        masked = re.sub(r'\.\d+$', '.**', raw_ip)
+        log(f"✅ 出口 IP 确认：{masked} ({country})")
+    except Exception as e:
+        log(f"⚠️ 出口 IP 检测失败: {e}")
 
     session = login(account["email"], account["password"])
     jump_to_xmgame(session)
