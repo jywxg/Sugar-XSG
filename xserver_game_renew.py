@@ -43,7 +43,7 @@ IP_CHECK_URL     = "https://api.ipify.org?format=json"
 RENEW_THRESHOLD_HOURS = 16
 
 USE_PROXY = os.environ.get("USE_PROXY", "1")
-PROXIES = {"http": "http://127.0.0.1:2080", "https": "http://127.0.0.1:2080"} if USE_PROXY else None
+PROXIES = {"http": "http://127.0.0.1:1080", "https": "http://127.0.0.1:1080"} if USE_PROXY else None
 
 TG_BOT = os.environ.get("TG_BOT", "")
 
