@@ -42,8 +42,10 @@ IP_CHECK_URL     = "https://api.ipify.org?format=json"
 
 RENEW_THRESHOLD_HOURS = 16
 
+# 读取代理节点配置
 NODE_LINK = os.environ.get("NODE_LINK", "")
-PROXIES = {"http": "http://127.0.0.1:1080", "https": "http://127.0.0.1:1080"} if NODE_LINK else {}
+# 根据 setup_proxy.sh 的配置，HTTP 代理端口为 1081
+PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"} if NODE_LINK else {}
 
 TG_BOT = os.environ.get("TG_BOT", "")
 
