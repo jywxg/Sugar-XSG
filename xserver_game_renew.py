@@ -391,12 +391,14 @@ def run_account(account):
     log(f"🕐 运行时间: {now_str()}")
     log(f"🖥 服务器: {SERVER_NAME}")
 
-    log("🌐 验证出口 IP...")
+log("🌐 验证出口 IP...")
     try:
         resp = requests.get(IP_CHECK_URL, timeout=10, proxies=PROXIES)
-        raw_ip = resp.json().get("ip", "未知")
+        ip_data = resp.json()
+        raw_ip = ip_data.get("ip", "未知")
+        country = ip_data.get("country", "未知") # 获取国家代码
         masked = re.sub(r'\.\d+$', '.**', raw_ip)
-        log(f"✅ 出口 IP 确认：{masked}")
+        log(f"✅ 出口 IP 确认：{masked} ({country})") # 打印时附加国家信息
     except Exception as e:
         log(f"⚠️ 出口 IP 检测失败: {e}")
 
