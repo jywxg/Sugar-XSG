@@ -48,9 +48,19 @@ PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"} if
 TG_BOT = os.environ.get("TG_BOT", "")
 
 BASE_HEADERS = {
-    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    "cache-control": "no-cache",
+    "pragma": "no-cache",
+    "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not;A=Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
 }
 
 SCRIPT_NAME = os.path.basename(__file__)
@@ -138,6 +148,13 @@ def login(email, password) -> requests.Session:
     email_masked = re.sub(r"(.{2}).*(@.*)", r"\1***\2", email)
     log(f"🔑 正在登录... 账号: {email_masked}")
     session = requests.Session()
+    
+    # 配置 Session 以支持更好的 HTTP 特性
+    session.headers.update(BASE_HEADERS)
+    session.max_redirects = 10
+    
+    # 添加适当的延迟，模拟真实用户行为
+    time.sleep(1)
 
     try:
         resp = session.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=15, proxies=PROXIES)
@@ -187,6 +204,7 @@ def login(email, password) -> requests.Session:
 
 def jump_to_xmgame(session: requests.Session):
     log("🔗 跳转到游戏面板...")
+    time.sleep(1)
 
     try:
         resp = session.get(
@@ -204,9 +222,14 @@ def jump_to_xmgame(session: requests.Session):
     jumpvps_match = re.search(r'/xapanel/xmgame/jumpvps/\?id=(\d+)', resp.text)
     if not jumpvps_match:
         log("❌ 未找到 jumpvps 链接")
+        timestamp = int(time.time())
+        save_debug_html(resp.text, f"debug_xmgame_index_{timestamp}.html")
+        log(f"DEBUG: {resp.text[:1000]}")
         sys.exit(1)
     server_id = jumpvps_match.group(1)
     log(f"✅ 找到服务器 ID: {server_id}")
+    
+    time.sleep(1)
 
     try:
         resp2 = session.get(
@@ -221,16 +244,23 @@ def jump_to_xmgame(session: requests.Session):
         log(f"❌ 获取 jumpvps 失败: {e}")
         sys.exit(1)
 
-    username        = re.search(r'name="username"\s+value="([^"]+)"', resp2.text)
-    server_identify = re.search(r'name="server_identify"\s+value="([^"]+)"', resp2.text)
-    password        = re.search(r'name="password"\s+value="([^"]+)"', resp2.text)
-    service         = re.search(r'name="service"\s+value="([^"]+)"', resp2.text)
-    master_panel    = re.search(r'name="master_panel_username"\s+value="([^"]*)"', resp2.text)
-    back            = re.search(r'name="back"\s+value="([^"]+)"', resp2.text)
+    # 尝试多种方式解析表单字段，兼容不同的 HTML 格式
+    username = (re.search(r'name="username"\s+value="([^"]+)"', resp2.text) or
+                re.search(r'name=\'username\'\s+value=\'([^\']+)\'', resp2.text))
+    server_identify = (re.search(r'name="server_identify"\s+value="([^"]+)"', resp2.text) or
+                       re.search(r'name=\'server_identify\'\s+value=\'([^\']+)\'', resp2.text))
+    password = (re.search(r'name="password"\s+value="([^"]+)"', resp2.text) or
+                re.search(r'name=\'password\'\s+value=\'([^\']+)\'', resp2.text))
+    service = (re.search(r'name="service"\s+value="([^"]+)"', resp2.text) or
+               re.search(r'name=\'service\'\s+value=\'([^\']+)\'', resp2.text))
+    master_panel = re.search(r'name="master_panel_username"\s+value="([^"]*)"', resp2.text)
+    back = re.search(r'name="back"\s+value="([^"]+)"', resp2.text)
 
     if not all([username, server_identify, password, service]):
         log("❌ 解析 onetimelogin 表单失败")
-        log(f"DEBUG: {resp2.text}")
+        timestamp = int(time.time())
+        save_debug_html(resp2.text, f"debug_jumpvps_{timestamp}.html")
+        log(f"DEBUG: {resp2.text[:2000]}")
         sys.exit(1)
 
     try:
@@ -267,6 +297,7 @@ def jump_to_xmgame(session: requests.Session):
 
 
 def fetch_info_page(session: requests.Session) -> str:
+    time.sleep(1)
     try:
         resp = session.get(
             INFO_URL,
@@ -283,6 +314,7 @@ def fetch_info_page(session: requests.Session) -> str:
 
 
 def fetch_extend_page(session: requests.Session) -> str:
+    time.sleep(1)
     try:
         resp = session.get(
             EXTEND_URL,
@@ -297,6 +329,15 @@ def fetch_extend_page(session: requests.Session) -> str:
         log(f"❌ 获取续期页面失败: {e}")
         sys.exit(1)
 
+
+def save_debug_html(html_content, filename):
+    """保存调试 HTML 页面"""
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        log(f"📄 调试页面已保存至: {filename}")
+    except Exception as e:
+        log(f"⚠️ 保存调试页面失败: {e}")
 
 def do_renew(session: requests.Session) -> bool:
     log("📝 获取续期表单...")
@@ -313,16 +354,31 @@ def do_renew(session: requests.Session) -> bool:
         log(f"❌ 获取续期表单失败: {e}")
         return False
 
-    uniqid      = re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text)
-    login_token = re.search(r'name="login_token"\s+value="([^"]+)"', resp.text)
-    period      = re.search(r'name="period"[^>]*value="(\d+)"', resp.text)
+    # 尝试多种方式解析 uniqid 和 login_token，兼容不同的 HTML 格式
+    uniqid = (re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text) or
+              re.search(r'name=\'uniqid\'\s+value=\'([^\']+)\'', resp.text) or
+              re.search(r'name=uniqid\s+value=([^\s>]+)', resp.text))
+    
+    login_token = (re.search(r'name="login_token"\s+value="([^"]+)"', resp.text) or
+                   re.search(r'name=\'login_token\'\s+value=\'([^\']+)\'', resp.text) or
+                   re.search(r'name=login_token\s+value=([^\s>]+)', resp.text))
+    
+    period = (re.search(r'name="period"[^>]*value="(\d+)"', resp.text) or
+              re.search(r'name=\'period\'[^>]*value=\'(\d+)\'', resp.text) or
+              re.search(r'name=period[^>]*value=([^\s>]+)', resp.text))
 
     if not uniqid or not login_token:
         log("❌ 解析续期表单失败")
-        log(f"DEBUG: {resp.text[:500]}")
+        timestamp = int(time.time())
+        save_debug_html(resp.text, f"debug_renew_page_{timestamp}.html")
+        log(f"DEBUG: 响应 URL: {resp.url}")
+        log(f"DEBUG: 响应状态码: {resp.status_code}")
+        log(f"DEBUG: 响应头: {dict(resp.headers)}")
+        log(f"DEBUG: 页面完整内容已保存，开头 2000 字符:\n{resp.text[:2000]}")
         return False
 
     period_val = period.group(1) if period else "48"
+    log(f"✅ 解析表单成功: uniqid={uniqid.group(1)[:10]}..., login_token={login_token.group(1)[:10]}...")
 
     log("📤 提交确认页...")
     try:
@@ -349,10 +405,15 @@ def do_renew(session: requests.Session) -> bool:
         log(f"❌ 提交确认页失败: {e}")
         return False
 
-    uniqid2 = re.search(r'name="uniqid"\s+value="([^"]+)"', resp2.text)
+    uniqid2 = (re.search(r'name="uniqid"\s+value="([^"]+)"', resp2.text) or
+               re.search(r'name=\'uniqid\'\s+value=\'([^\']+)\'', resp2.text) or
+               re.search(r'name=uniqid\s+value=([^\s>]+)', resp2.text))
+    
     if not uniqid2:
         log("❌ 解析确认页表单失败")
-        log(f"DEBUG: {resp2.text[:500]}")
+        timestamp = int(time.time())
+        save_debug_html(resp2.text, f"debug_conf_page_{timestamp}.html")
+        log(f"DEBUG: {resp2.text[:1000]}")
         return False
 
     log("✅ 续期执行完成")
