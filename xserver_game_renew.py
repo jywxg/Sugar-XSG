@@ -40,7 +40,7 @@ CONF_URL         = f"{BASE_URL}/xmgame/game/freeplan/extend/conf"
 DO_URL           = f"{BASE_URL}/xmgame/game/freeplan/extend/do"
 IP_CHECK_URL     = "https://ipinfo.io/json"
 
-RENEW_THRESHOLD_HOURS = 16
+RENEW_THRESHOLD_HOURS = 4
 
 NODE_LINK = os.environ.get("NODE_LINK", "")
 PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"} if NODE_LINK else {}
@@ -108,7 +108,7 @@ def parse_remaining(page_html: str) -> tuple:
 
 
 def can_renew(page_html: str) -> bool:
-    return "残り契約時間が16時間を切るまで" not in page_html
+    return "残り契約時間が4時間を切るまで" not in page_html
 
 
 def notify_tg(result: str, deadline: str):
@@ -341,6 +341,7 @@ def save_debug_html(html_content, filename):
 
 def do_renew(session: requests.Session) -> bool:
     log("📝 获取续期表单...")
+    time.sleep(1)
     try:
         resp = session.get(
             RENEW_URL,
@@ -356,19 +357,26 @@ def do_renew(session: requests.Session) -> bool:
 
     # 尝试多种方式解析 uniqid 和 login_token，兼容不同的 HTML 格式
     uniqid = (re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text) or
-              re.search(r'name=\'uniqid\'\s+value=\'([^\']+)\'', resp.text) or
-              re.search(r'name=uniqid\s+value=([^\s>]+)', resp.text))
+                re.search(r'name=\'uniqid\'\s+value=\'([^\']+)\'', resp.text) or
+                re.search(r'name=uniqid\s+value=([^\s>]+)', resp.text))
     
+    # 先尝试从表单字段，再尝试从 JavaScript 变量中获取 login_token
     login_token = (re.search(r'name="login_token"\s+value="([^"]+)"', resp.text) or
                    re.search(r'name=\'login_token\'\s+value=\'([^\']+)\'', resp.text) or
-                   re.search(r'name=login_token\s+value=([^\s>]+)', resp.text))
+                   re.search(r'name=login_token\s+value=([^\s>]+)', resp.text) or
+                   re.search(r'clientLoginToken\s*=\s*["\']([^"\']+)["\']', resp.text))
     
     period = (re.search(r'name="period"[^>]*value="(\d+)"', resp.text) or
               re.search(r'name=\'period\'[^>]*value=\'(\d+)\'', resp.text) or
               re.search(r'name=period[^>]*value=([^\s>]+)', resp.text))
 
-    if not uniqid or not login_token:
-        log("❌ 解析续期表单失败")
+    if not uniqid:
+        log("⚠️ 未找到 uniqid 表单字段，尝试从页面中查找其他可能的标识...")
+        # 如果没有找到 uniqid，我们可以尝试不使用它，或者使用其他方式
+        # 先记录下来，但继续尝试
+    
+    if not login_token:
+        log("❌ 解析续期表单失败：未找到 login_token")
         timestamp = int(time.time())
         save_debug_html(resp.text, f"debug_renew_page_{timestamp}.html")
         log(f"DEBUG: 响应 URL: {resp.url}")
@@ -378,10 +386,23 @@ def do_renew(session: requests.Session) -> bool:
         return False
 
     period_val = period.group(1) if period else "48"
-    log(f"✅ 解析表单成功: uniqid={uniqid.group(1)[:10]}..., login_token={login_token.group(1)[:10]}...")
+    
+    # 记录我们找到的值
+    uniqid_display = f"uniqid={uniqid.group(1)[:10]}..." if uniqid else "uniqid=NOT_FOUND"
+    log(f"✅ 解析表单成功: {uniqid_display}, login_token={login_token.group(1)[:10]}...")
 
     log("📤 提交确认页...")
+    time.sleep(1)
     try:
+        # 构建表单数据，只有在找到 uniqid 时才添加
+        form_data = {
+            "ethna_csrf":  "",
+            "login_token": login_token.group(1),
+            "period":      period_val,
+        }
+        if uniqid:
+            form_data["uniqid"] = uniqid.group(1)
+        
         resp2 = session.post(
             CONF_URL,
             headers={
@@ -390,12 +411,7 @@ def do_renew(session: requests.Session) -> bool:
                 "origin": BASE_URL,
                 "referer": RENEW_URL,
             },
-            data={
-                "uniqid":      uniqid.group(1),
-                "ethna_csrf":  "",
-                "login_token": login_token.group(1),
-                "period":      period_val,
-            },
+            data=form_data,
             timeout=15,
             proxies=PROXIES,
             allow_redirects=True,
@@ -410,14 +426,19 @@ def do_renew(session: requests.Session) -> bool:
                re.search(r'name=uniqid\s+value=([^\s>]+)', resp2.text))
     
     if not uniqid2:
-        log("❌ 解析确认页表单失败")
-        timestamp = int(time.time())
-        save_debug_html(resp2.text, f"debug_conf_page_{timestamp}.html")
-        log(f"DEBUG: {resp2.text[:1000]}")
-        return False
-
+        log("⚠️ 未在确认页找到 uniqid，但尝试继续执行...")
+    
     log("✅ 续期执行完成")
+    time.sleep(1)
     try:
+        # 同样，只有在找到 uniqid2 时才添加
+        do_form_data = {
+            "ethna_csrf": "",
+            "period":     period_val,
+        }
+        if uniqid2:
+            do_form_data["uniqid"] = uniqid2.group(1)
+        
         session.post(
             DO_URL,
             headers={
@@ -426,11 +447,7 @@ def do_renew(session: requests.Session) -> bool:
                 "origin": BASE_URL,
                 "referer": CONF_URL,
             },
-            data={
-                "uniqid":     uniqid2.group(1),
-                "ethna_csrf": "",
-                "period":     period_val,
-            },
+            data=do_form_data,
             timeout=15,
             proxies=PROXIES,
             allow_redirects=True,
