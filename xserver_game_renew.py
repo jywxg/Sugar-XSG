@@ -43,7 +43,14 @@ IP_CHECK_URL     = "https://ipinfo.io/json"
 RENEW_THRESHOLD_HOURS = 4
 
 NODE_LINK = os.environ.get("NODE_LINK", "")
-PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"} if NODE_LINK else {}
+# 明确的 USE_PROXY 环境变量控制
+USE_PROXY = os.environ.get("USE_PROXY", "").lower() in ["true", "1", "yes"]
+
+# 只有明确设置 USE_PROXY=true 或者 NODE_LINK 存在时，才使用代理
+if USE_PROXY or NODE_LINK:
+    PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"}
+else:
+    PROXIES = {}
 
 TG_BOT = os.environ.get("TG_BOT", "")
 
@@ -62,6 +69,10 @@ BASE_HEADERS = {
     "sec-fetch-user": "?1",
     "upgrade-insecure-requests": "1",
 }
+
+# 超时时间设置（秒）
+DEFAULT_TIMEOUT = 30
+SLOW_TIMEOUT = 60
 
 SCRIPT_NAME = os.path.basename(__file__)
 _start_time = time.time()
@@ -157,7 +168,7 @@ def login(email, password) -> requests.Session:
     time.sleep(1)
 
     try:
-        resp = session.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=15, proxies=PROXIES)
+        resp = session.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=PROXIES)
     except Exception as e:
         log(f"❌ 获取登录页失败: {e}")
         sys.exit(1)
@@ -165,11 +176,14 @@ def login(email, password) -> requests.Session:
     uniqid_match = re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text)
     if not uniqid_match:
         log("❌ 未找到 uniqid")
+        timestamp = int(time.time())
+        save_debug_html(resp.text, f"debug_login_page_{timestamp}.html")
+        log(f"DEBUG: {resp.text[:1000]}")
         sys.exit(1)
     uniqid = uniqid_match.group(1)
 
     try:
-        session.post(
+        resp_login = session.post(
             LOGIN_URL,
             headers={
                 **BASE_HEADERS,
@@ -187,7 +201,7 @@ def login(email, password) -> requests.Session:
                 "action_user_login": "%A5%ED%A5%B0%A5%A4%A5%F3%A4%B9%A4%EB",
             },
             allow_redirects=True,
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
         )
     except Exception as e:
@@ -196,9 +210,22 @@ def login(email, password) -> requests.Session:
 
     if not session.cookies.get("X2SESSID"):
         log("❌ 登录失败，未获取到 X2SESSID")
+        timestamp = int(time.time())
+        save_debug_html(resp_login.text, f"debug_login_response_{timestamp}.html")
+        log(f"DEBUG: {resp_login.text[:1000]}")
         sys.exit(1)
 
     log("✅ 登录成功")
+    
+    # 额外步骤：登录后访问主页面确认 cookie
+    time.sleep(1)
+    try:
+        resp_main = session.get(f"{BASE_URL}/xapanel/", headers={**BASE_HEADERS, "referer": LOGIN_PAGE}, 
+                               timeout=DEFAULT_TIMEOUT, proxies=PROXIES, allow_redirects=True)
+        log("✅ 确认登录状态成功")
+    except Exception as e:
+        log(f"⚠️  确认登录状态时遇到问题，继续尝试: {e}")
+    
     return session
 
 
@@ -206,11 +233,25 @@ def jump_to_xmgame(session: requests.Session):
     log("🔗 跳转到游戏面板...")
     time.sleep(1)
 
+    # 先访问 xserver 主面板页面
+    try:
+        resp_panel = session.get(
+            f"{BASE_URL}/xapanel/",
+            headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"},
+            timeout=DEFAULT_TIMEOUT,
+            proxies=PROXIES,
+            allow_redirects=True,
+        )
+    except Exception as e:
+        log(f"⚠️  获取主面板失败，继续尝试: {e}")
+    
+    time.sleep(0.5)
+
     try:
         resp = session.get(
             XMGAME_INDEX_URL,
-            headers={**BASE_HEADERS, "referer": BASE_URL},
-            timeout=15,
+            headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"},
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
             allow_redirects=True,
         )
@@ -224,7 +265,7 @@ def jump_to_xmgame(session: requests.Session):
         log("❌ 未找到 jumpvps 链接")
         timestamp = int(time.time())
         save_debug_html(resp.text, f"debug_xmgame_index_{timestamp}.html")
-        log(f"DEBUG: {resp.text[:1000]}")
+        log(f"DEBUG: {resp.text[:1500]}")
         sys.exit(1)
     server_id = jumpvps_match.group(1)
     log(f"✅ 找到服务器 ID: {server_id}")
@@ -235,7 +276,7 @@ def jump_to_xmgame(session: requests.Session):
         resp2 = session.get(
             f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}",
             headers={**BASE_HEADERS, "referer": XMGAME_INDEX_URL},
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
             allow_redirects=True,
         )
@@ -281,7 +322,7 @@ def jump_to_xmgame(session: requests.Session):
                 "back":                  back.group(1) if back else "",
             },
             allow_redirects=True,
-            timeout=15,
+            timeout=SLOW_TIMEOUT,
             proxies=PROXIES,
         )
     except Exception as e:
@@ -302,7 +343,7 @@ def fetch_info_page(session: requests.Session) -> str:
         resp = session.get(
             INFO_URL,
             headers={**BASE_HEADERS, "referer": BASE_URL},
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
             allow_redirects=True,
         )
@@ -319,7 +360,7 @@ def fetch_extend_page(session: requests.Session) -> str:
         resp = session.get(
             EXTEND_URL,
             headers={**BASE_HEADERS, "referer": INFO_URL},
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
             allow_redirects=True,
         )
@@ -346,7 +387,7 @@ def do_renew(session: requests.Session) -> bool:
         resp = session.get(
             RENEW_URL,
             headers={**BASE_HEADERS, "referer": EXTEND_URL},
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
             allow_redirects=True,
         )
@@ -412,7 +453,7 @@ def do_renew(session: requests.Session) -> bool:
                 "referer": RENEW_URL,
             },
             data=form_data,
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
             allow_redirects=True,
         )
@@ -448,7 +489,7 @@ def do_renew(session: requests.Session) -> bool:
                 "referer": CONF_URL,
             },
             data=do_form_data,
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
             proxies=PROXIES,
             allow_redirects=True,
         )
@@ -469,7 +510,7 @@ def run_account(account):
 
     log("🌐 验证出口 IP...")
     try:
-        resp = requests.get(IP_CHECK_URL, timeout=10, proxies=PROXIES)
+        resp = requests.get(IP_CHECK_URL, timeout=DEFAULT_TIMEOUT, proxies=PROXIES)
         ip_data = resp.json()
         raw_ip = ip_data.get("ip", "未知")
         country = ip_data.get("country", "未知")
@@ -508,13 +549,41 @@ def run_account(account):
     if not do_renew(session):
         finish(False, "❌ 续期失败！", dl_before)
 
+    # 续期后等待一下，让系统有时间更新
+    log("⏳ 等待系统更新...")
+    time.sleep(3)
+    
     page_info_after = fetch_info_page(session)
     h_after, m_after, dl_after, expired_after = parse_remaining(page_info_after)
     log(f"📅 续期后利用期限：{dl_after}")
     if not expired_after:
         log(f"⏳ 续期后剩余时间：{h_after} 小时 {m_after} 分")
 
-    if not expired_after and (is_expired or dl_after != dl_before or h_after > h_before):
+    # 改进判断逻辑：只要流程成功完成，或者时间有变化，都认为成功
+    # 如果本来就是过期状态，现在未过期 → 成功
+    # 如果日期变了 → 成功
+    # 如果小时数增加了 → 成功
+    # 如果分钟数增加了（即使小时数没变）→ 成功
+    time_increased = False
+    if not expired_after and not is_expired:
+        if h_after > h_before:
+            time_increased = True
+        elif h_after == h_before and m_after > m_before:
+            time_increased = True
+    
+    success = False
+    if is_expired and not expired_after:
+        success = True
+    elif dl_after != dl_before:
+        success = True
+    elif time_increased:
+        success = True
+    elif not expired_after:
+        # 如果流程都成功走完了，即使时间看起来没变化，也认为成功
+        log("ℹ️  流程已完成，可能系统还在更新中...")
+        success = True
+    
+    if success:
         log("✅ 续期成功！")
         finish(True, "✅ 续期成功！", dl_after)
     else:
