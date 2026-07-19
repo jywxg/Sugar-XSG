@@ -25,7 +25,7 @@
 |---|:---:|---|---|
 | `XSERVER_GAME_ACCOUNT` | ✅ | `自定义名称,邮箱,密码` | `我的服务器,foo@bar.com,mypassword` |
 | `TG_BOT` | ❌ | `chat_id,bot_token` | `123456789,7712345:AAFxxx` |
-| `GOST_PROXY` | ❌ | GOST 代理地址 | `socks5://user:pass@1.2.3.4:1080` |
+| `NODE_LINK` | ❌ | 代理链接（如 vless:// vmess:// trojan:// hysteria2:// tuic:// anytls:// socks5:// ) |
 
 ---
 
