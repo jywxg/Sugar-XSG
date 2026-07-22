@@ -43,11 +43,13 @@ IP_CHECK_URL     = "https://ipinfo.io/json"
 RENEW_THRESHOLD_HOURS = 4
 
 NODE_LINK = os.environ.get("NODE_LINK", "")
-# 明确的 USE_PROXY 环境变量控制
-USE_PROXY = os.environ.get("USE_PROXY", "").lower() in ["true", "1", "yes"]
 
-# 只有明确设置 USE_PROXY=true 或者 NODE_LINK 存在时，才使用代理
-if USE_PROXY or NODE_LINK:
+# 修正：通过解析出的环境变量状态，决定是否挂载代理配置，以支持降级直连
+USE_PROXY = os.environ.get("USE_PROXY", "false").lower() in ["true", "1", "yes"]
+PROXY_STATUS = os.environ.get("PROXY_STATUS", "直连")
+
+# 只有在 USE_PROXY 被设为 true 才会使用代理（即使 NODE_LINK 存在但全部连接失败，依然会被设为 false 并直连）
+if USE_PROXY:
     PROXIES = {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"}
 else:
     PROXIES = {}
@@ -129,9 +131,12 @@ def notify_tg(result: str, deadline: str):
     if len(parts) != 2:
         return
     chat_id, bot_token = parts[0].strip(), parts[1].strip()
+    
+    # 将网络状态 PROXY_STATUS 加到通知中
     message = (
         f"🎮 XServer Game 续期通知\n"
         f"🕐 运行时间: {now_str()}\n"
+        f"🌐 网络: {PROXY_STATUS}\n"
         f"🖥 服务器: {SERVER_NAME}\n"
         f"📅 利用期限: {deadline}\n"
         f"📊 续期结果: {result}"
@@ -503,7 +508,7 @@ def do_renew(session: requests.Session) -> bool:
 def run_account(account):
     global SERVER_NAME
     SERVER_NAME = account["name"]
-    log(f"{'🛡️ 使用代理模式' if PROXIES else '🌐 直连模式'}")
+    log(f"{'🛡️ 使用代理网络' if USE_PROXY else f'🌐 {PROXY_STATUS}'}")
     divider(f"{SCRIPT_NAME} starts")
     log(f"🕐 运行时间: {now_str()}")
     log(f"🖥 服务器: {SERVER_NAME}")
