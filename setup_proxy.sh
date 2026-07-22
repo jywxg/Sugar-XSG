@@ -354,7 +354,7 @@ EOF
     
     # 写入状态标志
     echo "USE_PROXY=true" >> $GITHUB_ENV
-    echo "PROXY_STATUS=代理 IP: $ip_addr ($country)" >> $GITHUB_ENV
+    echo "PROXY_STATUS=代理: $ip_addr ($country)" >> $GITHUB_ENV
     exit 0
   else
     echo "[WARN] ❌ 节点 [$node_idx] 无法连接或超时，尝试下一个节点..."
