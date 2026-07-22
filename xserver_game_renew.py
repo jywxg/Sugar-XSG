@@ -47,6 +47,15 @@ NODE_LINK = os.environ.get("NODE_LINK", "")
 # 修正：通过解析出的环境变量状态，决定是否挂载代理配置，以支持降级直连
 USE_PROXY = os.environ.get("USE_PROXY", "false").lower() in ["true", "1", "yes"]
 PROXY_STATUS = os.environ.get("PROXY_STATUS", "直连")
+# 新增：存储代理信息
+PROXY_AVAILABLE = False
+PROXY_IP = "未知"
+PROXY_COUNTRY = "未知"
+DIRECT_IP = "未知"
+DIRECT_COUNTRY = "未知"
+ACTUAL_MODE = "直连"
+ACTUAL_IP = "未知"
+ACTUAL_COUNTRY = "未知"
 
 # 只有在 USE_PROXY 被设为 true 才会使用代理（即使 NODE_LINK 存在但全部连接失败，依然会被设为 false 并直连）
 if USE_PROXY:
@@ -132,11 +141,31 @@ def notify_tg(result: str, deadline: str):
         return
     chat_id, bot_token = parts[0].strip(), parts[1].strip()
     
-    # 将网络状态 PROXY_STATUS 加到通知中
+    # 构建网络状态信息
+    proxy_masked = re.sub(r'\.\d+$', '.**', PROXY_IP)
+    direct_masked = re.sub(r'\.\d+$', '.**', DIRECT_IP)
+    actual_masked = re.sub(r'\.\d+$', '.**', ACTUAL_IP)
+    
+    network_info = []
+    if USE_PROXY:
+        proxy_status = "✅ 可用" if PROXY_AVAILABLE else "❌ 不可用/被屏蔽"
+        network_info.append(f"🔀 代理: {proxy_status}")
+        if PROXY_AVAILABLE:
+            network_info.append(f"   IP: {proxy_masked} ({PROXY_COUNTRY})")
+        network_info.append(f"🌐 直连: IP {direct_masked} ({DIRECT_COUNTRY})")
+        network_info.append(f"✅ 实际使用: {ACTUAL_MODE}")
+        if ACTUAL_MODE == "代理":
+            network_info.append(f"   IP: {actual_masked} ({ACTUAL_COUNTRY})")
+    else:
+        network_info.append(f"🌐 直连: IP {direct_masked} ({DIRECT_COUNTRY})")
+        network_info.append(f"✅ 实际使用: {ACTUAL_MODE}")
+    
+    network_str = "\n".join(network_info)
+    
     message = (
         f"🎮 XServer Game 续期通知\n"
         f"🕐 运行时间: {now_str()}\n"
-        f"🌐 网络: {PROXY_STATUS}\n"
+        f"{network_str}\n"
         f"🖥 服务器: {SERVER_NAME}\n"
         f"📅 利用期限: {deadline}\n"
         f"📊 续期结果: {result}"
@@ -376,6 +405,48 @@ def fetch_extend_page(session: requests.Session) -> str:
         sys.exit(1)
 
 
+def check_ip_info(proxies=None):
+    """检测IP和国家信息"""
+    try:
+        resp = requests.get(IP_CHECK_URL, timeout=DEFAULT_TIMEOUT, proxies=proxies)
+        ip_data = resp.json()
+        ip = ip_data.get("ip", "未知")
+        country = ip_data.get("country", "未知")
+        masked = re.sub(r'\.\d+$', '.**', ip)
+        return ip, country, masked
+    except Exception as e:
+        return "未知", "未知", "未知"
+
+def check_proxy_available():
+    """检测代理是否可用"""
+    global PROXY_AVAILABLE, PROXY_IP, PROXY_COUNTRY
+    if not USE_PROXY:
+        return False
+    try:
+        log("🌐 检测代理是否可用...")
+        # 先检测代理能否正常访问IP检测服务
+        ip, country, masked = check_ip_info(PROXIES)
+        if ip == "未知":
+            log("❌ 代理连接失败，无法获取IP信息")
+            return False
+        PROXY_IP = ip
+        PROXY_COUNTRY = country
+        PROXY_AVAILABLE = True
+        log(f"✅ 代理可用: {masked} ({country})")
+        
+        # 再检测代理是否能正常访问XServer
+        log("🔍 检测代理是否被XServer屏蔽...")
+        resp = requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=PROXIES, allow_redirects=True)
+        if resp.status_code == 200 and "login" in resp.text.lower():
+            log("✅ 代理未被XServer屏蔽")
+            return True
+        else:
+            log(f"⚠️ 代理可能被XServer屏蔽 (状态码: {resp.status_code})")
+            return False
+    except Exception as e:
+        log(f"❌ 代理检测失败: {e}")
+        return False
+
 def save_debug_html(html_content, filename):
     """保存调试 HTML 页面"""
     try:
@@ -506,23 +577,45 @@ def do_renew(session: requests.Session) -> bool:
 
 
 def run_account(account):
-    global SERVER_NAME
+    global SERVER_NAME, ACTUAL_MODE, ACTUAL_IP, ACTUAL_COUNTRY, DIRECT_IP, DIRECT_COUNTRY
     SERVER_NAME = account["name"]
-    log(f"{'🛡️ 使用代理网络' if USE_PROXY else f'🌐 {PROXY_STATUS}'}")
     divider(f"{SCRIPT_NAME} starts")
     log(f"🕐 运行时间: {now_str()}")
     log(f"🖥 服务器: {SERVER_NAME}")
 
-    log("🌐 验证出口 IP...")
-    try:
-        resp = requests.get(IP_CHECK_URL, timeout=DEFAULT_TIMEOUT, proxies=PROXIES)
-        ip_data = resp.json()
-        raw_ip = ip_data.get("ip", "未知")
-        country = ip_data.get("country", "未知")
-        masked = re.sub(r'\.\d+$', '.**', raw_ip)
-        log(f"✅ 出口 IP 确认：{masked} ({country})")
-    except Exception as e:
-        log(f"⚠️ 出口 IP 检测失败: {e}")
+    # 先获取直连IP信息
+    log("🌐 获取直连 IP 信息...")
+    DIRECT_IP, DIRECT_COUNTRY, direct_masked = check_ip_info()
+    if DIRECT_IP != "未知":
+        log(f"✅ 直连 IP：{direct_masked} ({DIRECT_COUNTRY})")
+    else:
+        log("⚠️ 直连 IP 检测失败")
+    
+    # 检测代理
+    if USE_PROXY:
+        proxy_ok = check_proxy_available()
+        if proxy_ok:
+            log("🛡️ 代理可用且未被屏蔽，使用代理")
+            ACTUAL_MODE = "代理"
+            ACTUAL_IP = PROXY_IP
+            ACTUAL_COUNTRY = PROXY_COUNTRY
+        else:
+            log("🌐 代理不可用或被屏蔽，降级使用直连")
+            ACTUAL_MODE = "直连"
+            ACTUAL_IP = DIRECT_IP
+            ACTUAL_COUNTRY = DIRECT_COUNTRY
+            # 清空代理设置
+            global PROXIES
+            PROXIES = {}
+    else:
+        log("🌐 使用直连模式")
+        ACTUAL_MODE = "直连"
+        ACTUAL_IP = DIRECT_IP
+        ACTUAL_COUNTRY = DIRECT_COUNTRY
+    
+    # 显示实际使用的IP
+    actual_masked = re.sub(r'\.\d+$', '.**', ACTUAL_IP)
+    log(f"✅ 实际使用：{ACTUAL_MODE} - {actual_masked} ({ACTUAL_COUNTRY})")
 
     session = login(account["email"], account["password"])
     jump_to_xmgame(session)
