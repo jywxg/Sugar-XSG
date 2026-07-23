@@ -25,6 +25,7 @@ jobs:
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
+          chmod +x setup_proxy.sh
           bash setup_proxy.sh
 
       - name: 🔧 执行续期
