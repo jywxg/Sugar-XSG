@@ -25,7 +25,6 @@ jobs:
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          chmod +x setup_proxy.sh
           bash setup_proxy.sh
 
       - name: 🔧 执行续期
@@ -54,7 +53,6 @@ jobs:
             echo "无变化，无需提交"
           else
             git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
-            git pull --rebase origin main
             git push origin HEAD:main
           fi
 
