@@ -45,7 +45,8 @@ RENEW_THRESHOLD_HOURS = 4
 NODE_LINK = os.environ.get("NODE_LINK", "")
 
 # 修正：通过解析出的环境变量状态，决定是否挂载代理配置，以支持降级直连
-USE_PROXY = os.environ.get("USE_PROXY", "false").lower() in ["true", "1", "yes"]
+# 已适配从环境变量读取 IS_PROXY
+USE_PROXY = os.environ.get("IS_PROXY", "false").lower() in ["true", "1", "yes"]
 PROXY_STATUS = os.environ.get("PROXY_STATUS", "直连")
 # 新增：存储代理信息
 PROXY_AVAILABLE = False
