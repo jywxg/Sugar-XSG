@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup_proxy.sh - 多节点轮询解析与 sing-box 启动 (终极优化版)
+# setup_proxy.sh - 多节点轮询解析与 sing-box 启动 (最终对齐版)
 export LC_ALL=C
 set -e
 
@@ -7,7 +7,7 @@ export NODE_LINK=${NODE_LINK:-''}
 
 if [ -z "$NODE_LINK" ]; then
   echo "[INFO] 未配置代理，直连模式"
-  [ -n "$GITHUB_ENV" ] && echo "IS_PROXY=false" >> "$GITHUB_ENV"
+  [ -n "$GITHUB_ENV" ] && echo "USE_PROXY=false" >> "$GITHUB_ENV"
   exit 0
 fi
 
@@ -345,27 +345,23 @@ for single_node in "${NODE_ARRAY[@]}"; do
 }
 EOF
 
-  # 【优化点1】提前验证生成的 JSON 是否合法，如果不合法直接跳过
   if ! jq empty sing-box-config.json 2>/dev/null; then
     echo "[WARN] ❌ 节点 [$node_idx] 配置存在 JSON 语法错误，已跳过！"
     continue
   fi
 
-  # 每次切换节点前，清理旧进程防止端口占用
   pkill -f sing-box 2>/dev/null || true
   sleep 1
 
   ./sing-box run -c sing-box-config.json > sing-box.log 2>&1 &
   sleep 2
 
-  # 【优化点2】快速失败检测：检查 sing-box 是否启动就闪退（例如协议不支持）
   if ! pgrep -f sing-box > /dev/null; then
     echo "[WARN] ❌ 节点 [$node_idx] 启动失败(进程崩溃)，可能是节点配置或协议不支持，查看日志前三行："
     head -n 3 sing-box.log
     continue
   fi
 
-  # 测试当前节点的连通性
   echo "[INFO] 启动成功，测试节点连通性..."
   ip_info=$(curl -x socks5://127.0.0.1:1080 -s --max-time 10 https://ipinfo.io/json || true)
 
@@ -375,9 +371,8 @@ EOF
 
     echo "[INFO] ✅ 节点 [$node_idx] 连接成功！ | 📍 IP: $ip_addr | 🌍 国家: $country"
     
-    # 【优化点3】安全的写入环境变量判断 (兼容本地跑脚本)
     if [ -n "$GITHUB_ENV" ]; then
-      echo "IS_PROXY=true" >> "$GITHUB_ENV"
+      echo "USE_PROXY=true" >> "$GITHUB_ENV"
       echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> "$GITHUB_ENV"
     fi
     exit 0
