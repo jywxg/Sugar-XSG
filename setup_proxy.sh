@@ -1,11 +1,11 @@
 #!/bin/bash
-# setup_proxy.sh - 多节点轮询解析与 sing-box 启动 (优化版)
+# setup_proxy.sh - 多节点轮询解析与 sing-box 启动 (优化修复版)
 export LC_ALL=C
 set -e
 
 export NODE_LINK=${NODE_LINK:-''}
 
-# 优化 1: 封装环境变量写入，兼容本地环境与 Github Actions
+# 封装环境变量写入，兼容本地环境与 Github Actions
 set_env() {
   local key=$1
   local value=$2
@@ -13,8 +13,6 @@ set_env() {
     echo "${key}=${value}" >> "$GITHUB_ENV"
   else
     export "${key}=${value}"
-    # 本地环境可选打印，便于调试
-    # echo "[ENV_SET] ${key}=${value}"
   fi
 }
 
@@ -26,7 +24,7 @@ if [ -z "$NODE_LINK" ]; then
   exit 0
 fi
 
-# 优化 2: 智能检测包管理器安装 jq
+# 智能检测包管理器安装 jq
 if ! command -v jq &> /dev/null; then
   echo "[WARN] jq 未安装，正在尝试安装..."
   if command -v apt-get &> /dev/null; then
@@ -44,10 +42,12 @@ fi
 command -v curl &>/dev/null && COMMAND="curl -sLo" || command -v wget &>/dev/null && COMMAND="wget -qO" || { echo "Error: neither curl nor wget found." >&2; exit 1; }
 
 echo "[INFO] 获取 sing-box 最新版本..."
-# 优化 3: 使用 /latest 接口，减轻 API 压力并简化解析
-latest_version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name // ""' | sub("^v"; ""))
+# 修复版本获取逻辑：使用纯 Bash 截取变量开头的 v，避免外部语法错误
+tag_name=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name // ""')
+latest_version="${tag_name#v}"
+
 if [ -z "$latest_version" ]; then
-  echo "[WARN] 无法获取 sing-box 最新版本(可能触发 API 限制)，将默认使用 v1.13.14"
+  echo "[WARN] 无法获取 sing-box 最新版本(可能触发 API 限制)，将默认使用 1.13.14"
   export latest_version=1.13.14
 fi
 echo "[INFO] 最新稳定版本: v${latest_version}"
@@ -93,10 +93,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
   content="${single_node#*://}"
   content="${content%%#*}"
 
-  # (省略中间冗长的节点变量重置与 case 协议解析部分，与原脚本完全一致，这里为您折叠保留原逻辑)
-  # ... [此处保留原脚本中 从 `outbound_type=""` 到 `jq_outbound="$jq_outbound}"` 的全部内容] ...
-  # 为了提供完整可用脚本，我将补全这部分：
-
+  # 重置节点变量
   outbound_type=""
   outbound_server=""
   outbound_port=""
@@ -151,6 +148,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       [ -z "$outbound_host" ] && outbound_host="$outbound_server"
       [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
       ;;
+
     vmess)
       b64="${content}"
       mod=$(( ${#b64} % 4 ))
@@ -178,6 +176,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       outbound_fingerprint="$fp"
       outbound_security="$tls"
       ;;
+
     trojan)
       pass_rest="${content#*://}"
       password="${pass_rest%%@*}"
@@ -200,6 +199,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       [ -z "$outbound_host" ] && outbound_host="$outbound_server"
       [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
       ;;
+
     hysteria2|hy2)
       if [[ "$content" == *"@"* ]]; then auth="${content%%@*}"; host_port="${content#*@}"; else host_port="$content"; fi
       if [[ "$host_port" == *"?"* ]]; then hp="${host_port%%\?*}"; query="${host_port#*\?}"; else hp="$host_port"; query=""; fi
@@ -217,6 +217,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       fi
       [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
       ;;
+
     tuic)
       uuid_pass="${content%%@*}"
       rest="${content#*@}"
@@ -236,6 +237,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       fi
       [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
       ;;
+      
     anytls)
       password="${content%%@*}"
       rest="${content#*@}"
@@ -252,6 +254,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       fi
       [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
       ;;
+
     socks5|socks)
       if [[ "$content" == *"@"* ]]; then
         user_pass="${content%%@*}"
@@ -276,6 +279,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       outbound_port="${host_port#*:}"
       outbound_type="socks"
       ;;
+
     *)
       echo "[WARN] 不支持的协议类型: $proto，跳过该节点"
       continue
@@ -287,6 +291,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
     continue
   fi
 
+  # 构建 outbound 对象
   jq_outbound="{\"type\":\"$outbound_type\",\"tag\":\"proxy\",\"server\":\"$outbound_server\",\"server_port\":$outbound_port"
   case "$outbound_type" in
     vless)
@@ -358,13 +363,14 @@ EOF
   PID=$!
   sleep 2
 
-  # 优化 4: 测试节点连接前，先检查 sing-box 进程是否还在运行 (防止因配置语法错误秒退)
+  # 检查 sing-box 进程是否还在运行 (防止因配置语法错误秒退)
   if ! kill -0 $PID 2>/dev/null; then
     echo "[WARN] ❌ sing-box 启动失败 (可能是节点配置参数不受支持)，跳过该节点..."
     cat sing-box.log | tail -n 5
     continue
   fi
 
+  # 测试当前节点的连通性
   echo "[INFO] 测试节点连接性..."
   ip_info=$(curl -x socks5://127.0.0.1:1080 -s --max-time 8 https://ipinfo.io/json || true)
 
@@ -381,7 +387,6 @@ EOF
     exit 0
   else
     echo "[WARN] ❌ 节点 [$node_idx] 无法连接或超时，尝试下一个节点..."
-    # 尝试读取一下失败的日志
     [ -s sing-box.log ] && cat sing-box.log | tail -n 3
   fi
 done
