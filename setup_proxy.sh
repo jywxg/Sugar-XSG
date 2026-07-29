@@ -7,7 +7,7 @@ export NODE_LINK=${NODE_LINK:-''}
 
 if [ -z "$NODE_LINK" ]; then
   echo "[INFO] 未配置代理，直连模式"
-  [ -n "$GITHUB_ENV" ] && echo "USE_PROXY=false" >> "$GITHUB_ENV"
+  [ -n "$GITHUB_ENV" ] && echo "IS_PROXY=false" >> "$GITHUB_ENV"
   exit 0
 fi
 
@@ -62,7 +62,7 @@ chmod +x sing-box
 # 辅助函数：URL 解码
 url_decode() {
   local encoded="$1"
-  printf '%b' "$(echo "$encoded" | sed 's/%/\\x/g')"
+  printf '%b' "$(echo "$encoded" | sed 's/%/\x/g')"
 }
 
 # 将 NODE_LINK 按行拆分为数组
@@ -372,7 +372,7 @@ EOF
     echo "[INFO] ✅ 节点 [$node_idx] 连接成功！ | 📍 IP: $ip_addr | 🌍 国家: $country"
     
     if [ -n "$GITHUB_ENV" ]; then
-      echo "USE_PROXY=true" >> "$GITHUB_ENV"
+      echo "IS_PROXY=true" >> "$GITHUB_ENV"
       echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> "$GITHUB_ENV"
     fi
     exit 0
