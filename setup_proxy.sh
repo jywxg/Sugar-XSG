@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup_proxy.sh - 多节点轮询解析与 sing-box 启动
+# setup_proxy.sh - 多节点轮询解析与 sing-box 启动 (最终对齐版)
 export LC_ALL=C
 set -e
 
@@ -7,25 +7,39 @@ export NODE_LINK=${NODE_LINK:-''}
 
 if [ -z "$NODE_LINK" ]; then
   echo "[INFO] 未配置代理，直连模式"
-  echo "IS_PROXY=false" >> $GITHUB_ENV
-  echo "USE_PROXY=false" >> $GITHUB_ENV
-  echo "PROXY_STATUS=直连" >> $GITHUB_ENV
+  [ -n "$GITHUB_ENV" ] && echo "IS_PROXY=false" >> "$GITHUB_ENV"
   exit 0
 fi
 
 if ! command -v jq &> /dev/null; then
-  echo "[ERROR] jq 未安装，正在安装..."
+  echo "[WARN] jq 未安装，正在安装..."
   sudo apt-get update && sudo apt-get install -y jq
 fi
 
-command -v curl &>/dev/null && COMMAND="curl -so" || command -v wget &>/dev/null && COMMAND="wget -qO" || { echo "Error: neither curl nor wget found." >&2; exit 1; }
+command -v curl &>/dev/null && COMMAND="curl -so" || command -v wget &>/dev/null && COMMAND="wget -qO" || { echo "[ERROR] 既没有 curl 也没有 wget，请安装其中之一." >&2; exit 1; }
 
 echo "[INFO] 获取 sing-box 最新版本..."
-latest_version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r '[.[] | select(.prerelease==false)][0].tag_name | sub("^v"; "")')
+latest_version=""
+
+# 重试 3 次机制
+for i in {1..3}; do
+  version_tag=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name // empty' 2>/dev/null || true)
+  
+  if [ -n "$version_tag" ] && [ "$version_tag" != "null" ]; then
+    latest_version="${version_tag#v}"
+    break
+  fi
+  
+  echo "[WARN] 无法获取版本信息 (尝试 $i/3)，2秒后重试..."
+  sleep 2
+done
+
+# 默认版本回退机制
 if [ -z "$latest_version" ]; then
-  echo "[ERROR] 无法获取 sing-box 最新版本，将下载 v1.13.14"
-  export latest_version=1.13.14
+  echo "[ERROR] 无法获取 sing-box 最新版本，将默认下载 v1.13.14"
+  export latest_version="1.13.14"
 fi
+
 echo "[INFO] 最新稳定版本: v${latest_version}"
 
 ARCH_RAW=$(uname -m)
@@ -35,7 +49,7 @@ case "${ARCH_RAW}" in
     'aarch64' | 'arm64') ARCH='arm64' ;;
     'armv7l')  ARCH='armv7' ;;
     's390x')   ARCH='s390x' ;;
-    *) echo "不支持的架构: ${ARCH_RAW}"; exit 1 ;;
+    *) echo "[ERROR] 不支持的架构: ${ARCH_RAW}"; exit 1 ;;
 esac
 
 $COMMAND sing-box-${latest_version}-linux-${ARCH}.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${latest_version}/sing-box-${latest_version}-linux-${ARCH}.tar.gz"
@@ -48,26 +62,29 @@ chmod +x sing-box
 # 辅助函数：URL 解码
 url_decode() {
   local encoded="$1"
-  printf '%b' "$(echo "$encoded" | sed 's/%/\\x/g')"
+  printf '%b' "$(echo "$encoded" | sed 's/%/\x/g')"
 }
 
 # 将 NODE_LINK 按行拆分为数组
 mapfile -t NODE_ARRAY <<< "$NODE_LINK"
 
 total_nodes=${#NODE_ARRAY[@]}
-echo "[INFO] 共检测到代理节点配置行，准备轮询测试..."
+echo "[INFO] 共检测到 $total_nodes 行配置，准备轮询测试..."
 
 node_idx=0
 for single_node in "${NODE_ARRAY[@]}"; do
-  # 清除任何不可见的空格和 \r 回车符，防止解析错位
+  # 清除任何不可见的空格和回车符，防止解析错位
   single_node=$(echo "$single_node" | tr -d '[:space:]')
   [ -z "$single_node" ] && continue
   
   node_idx=$((node_idx + 1))
   echo "----------------------------------------"
-  echo "[INFO] 正在尝试节点 [$node_idx] ..."
+  echo "[INFO] 正在尝试节点 [$node_idx/$total_nodes] ..."
 
   proto=$(echo "$single_node" | cut -d':' -f1)
+  # 修复 1: 转换为小写，兼容大写 VLESS/VMESS/Trojan 等协议头
+  proto=$(echo "$proto" | tr '[:upper:]' '[:lower:]')
+  
   content="${single_node#*://}"
   content="${content%%#*}"
 
@@ -125,6 +142,8 @@ for single_node in "${NODE_ARRAY[@]}"; do
       fi
       [ -z "$outbound_host" ] && outbound_host="$outbound_server"
       [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
+      # 修复 3: 如果存在 pbk 且未指定 security，则自动推断为 reality
+      [ -n "$outbound_reality_pbk" ] && [ "$outbound_security" = "none" ] && outbound_security="reality"
       ;;
 
     vmess)
@@ -132,7 +151,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       mod=$(( ${#b64} % 4 ))
       if [ $mod -eq 2 ]; then b64="${b64}=="; elif [ $mod -eq 3 ]; then b64="${b64}="; fi
       decoded=$(echo "$b64" | base64 -d 2>/dev/null || true)
-      if [ -z "$decoded" ]; then echo "[WARN] VMess 解码失败，跳过该节点"; continue; fi
+      if [ -z "$decoded" ]; then echo "[WARN] ❌ VMess 解码失败，跳过..."; continue; fi
       add=$(echo "$decoded" | jq -r '.add // ""')
       port=$(echo "$decoded" | jq -r '.port // 443')
       id=$(echo "$decoded" | jq -r '.id // ""')
@@ -259,13 +278,13 @@ for single_node in "${NODE_ARRAY[@]}"; do
       ;;
 
     *)
-      echo "[WARN] 不支持的协议类型: $proto，跳过该节点"
+      echo "[WARN] ❌ 不支持的协议类型: $proto，跳过..."
       continue
       ;;
   esac
 
   if [ -z "$outbound_server" ] || [ -z "$outbound_port" ]; then
-    echo "[WARN] 无法解析服务器地址或端口，跳过该节点"
+    echo "[WARN] ❌ 无法解析服务器地址或端口，跳过..."
     continue
   fi
 
@@ -284,13 +303,15 @@ for single_node in "${NODE_ARRAY[@]}"; do
       ;;
     vmess)
       jq_outbound="$jq_outbound,\"uuid\":\"$outbound_uuid\",\"security\":\"auto\""
-      jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
+      # 修复 2: 防止 vmess 协议在 tcp 模式下注入 path/headers 导致进程崩溃
+      if [ "$outbound_transport_type" != "tcp" ]; then jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"; fi
       tls_enabled="false"; [ "$outbound_security" = "tls" ] && tls_enabled="true"
       jq_outbound="$jq_outbound,\"tls\":{\"enabled\":$tls_enabled,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
       ;;
     trojan)
       jq_outbound="$jq_outbound,\"password\":\"$outbound_password\""
-      jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
+      # 修复 2: 防止 trojan 协议在 tcp 模式下注入 path/headers 导致进程崩溃
+      if [ "$outbound_transport_type" != "tcp" ]; then jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"; fi
       jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
       ;;
     hysteria2)
@@ -331,17 +352,24 @@ for single_node in "${NODE_ARRAY[@]}"; do
 }
 EOF
 
-  # 每次切换节点前，清理旧进程防止端口占用
+  if ! jq empty sing-box-config.json 2>/dev/null; then
+    echo "[WARN] ❌ 节点 [$node_idx] 配置存在 JSON 语法错误，已跳过！"
+    continue
+  fi
+
   pkill -f sing-box 2>/dev/null || true
-  fuser -k 1080/tcp 2>/dev/null || true
-  fuser -k 1081/tcp 2>/dev/null || true
   sleep 1
 
   ./sing-box run -c sing-box-config.json > sing-box.log 2>&1 &
-  sleep 3
+  sleep 2
 
-  # 测试当前节点的连通性
-  echo "[INFO] 测试节点连接性..."
+  if ! pgrep -f sing-box > /dev/null; then
+    echo "[WARN] ❌ 节点 [$node_idx] 启动失败(进程崩溃)，可能是节点配置或协议不支持，查看日志前三行："
+    head -n 3 sing-box.log
+    continue
+  fi
+
+  echo "[INFO] 启动成功，测试节点连通性..."
   ip_info=$(curl -x socks5://127.0.0.1:1080 -s --max-time 10 https://ipinfo.io/json || true)
 
   if [ -n "$ip_info" ] && echo "$ip_info" | jq -e '.ip' > /dev/null 2>&1; then
@@ -349,19 +377,16 @@ EOF
     country=$(echo "$ip_info" | jq -r '.country // "Unknown"')
 
     echo "[INFO] ✅ 节点 [$node_idx] 连接成功！ | 📍 IP: $ip_addr | 🌍 国家: $country"
-    echo "IS_PROXY=true" >> $GITHUB_ENV
-    echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
     
-    # 写入状态标志
-    echo "USE_PROXY=true" >> $GITHUB_ENV
-    echo "PROXY_STATUS=代理: $ip_addr ($country)" >> $GITHUB_ENV
+    if [ -n "$GITHUB_ENV" ]; then
+      echo "IS_PROXY=true" >> "$GITHUB_ENV"
+      echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> "$GITHUB_ENV"
+    fi
     exit 0
   else
-    echo "[WARN] ❌ 节点 [$node_idx] 无法连接或超时，尝试下一个节点..."
+    echo "[WARN] ❌ 节点 [$node_idx] 无法连接或请求超时，尝试下一个..."
   fi
 done
 
-echo "[WARN] ❌ 所有配置的代理节点均测试失败，自动切换为直连模式！"
-echo "USE_PROXY=false" >> $GITHUB_ENV
-echo "PROXY_STATUS=直连 (代理全部失效)" >> $GITHUB_ENV
-exit 0
+echo "[ERROR] ❌ 所有配置的代理节点均测试失败！"
+exit 1
