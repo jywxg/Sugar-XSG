@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup_proxy.sh - 多节点轮询解析与 sing-box 启动 (终极无错稳定版)
+# setup_proxy.sh - 多节点轮询解析与 sing-box 启动 (全兼容无错稳定版)
 export LC_ALL=C
 set -e
 
@@ -46,7 +46,7 @@ latest_version="${tag_name#v}"
 
 if [ -z "$latest_version" ]; then
   echo "[WARN] 无法获取 sing-box 最新版本(可能触发 API 限制)，将默认使用 1.13.14"
-  export latest_version="1.13.14"
+  latest_version="1.13.14"
 fi
 echo "[INFO] 最新稳定版本: v${latest_version}"
 
@@ -61,10 +61,19 @@ case "${ARCH_RAW}" in
 esac
 
 if [ ! -f "./sing-box" ]; then
-  curl -sLo "sing-box-${latest_version}-linux-${ARCH}.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v${latest_version}/sing-box-${latest_version}-linux-${ARCH}.tar.gz"
-  tar -xzf "sing-box-${latest_version}-linux-${ARCH}.tar.gz"
-  mv "sing-box-${latest_version}-linux-${ARCH}/sing-box" ./
-  rm -rf "sing-box-${latest_version}-linux-${ARCH}.tar.gz" "sing-box-${latest_version}-linux-${ARCH}"
+  echo "[INFO] 正在下载 sing-box 二进制文件..."
+  curl -sLo "sing-box-${latest_version}-linux-${ARCH}.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v${latest_version}/sing-box-${latest_version}-linux-${ARCH}.tar.gz" || true
+  if [ -f "sing-box-${latest_version}-linux-${ARCH}.tar.gz" ]; then
+    tar -xzf "sing-box-${latest_version}-linux-${ARCH}.tar.gz" 2>/dev/null || true
+    if [ -f "sing-box-${latest_version}-linux-${ARCH}/sing-box" ]; then
+      mv "sing-box-${latest_version}-linux-${ARCH}/sing-box" ./
+    fi
+    rm -rf "sing-box-${latest_version}-linux-${ARCH}.tar.gz" "sing-box-${latest_version}-linux-${ARCH}" 2>/dev/null || true
+  fi
+  if [ ! -f "./sing-box" ]; then
+    echo "[ERROR] sing-box 下载或解压失败！"
+    exit 1
+  fi
   chmod +x sing-box
 fi
 
@@ -74,7 +83,7 @@ url_decode() {
   printf '%b' "$(echo "$encoded" | sed 's/+/ /g; s/%/\\x/g')"
 }
 
-# 彻底修复：安全参数提取函数 (防止 grep 返回非 0 导致 set -e 崩溃，且防止子串匹配)
+# 安全参数提取函数 (保持原始大小写)
 get_query_param() {
   local query="$1"
   local key="$2"
@@ -83,7 +92,12 @@ get_query_param() {
   echo "$res"
 }
 
-# 安全 Base64 解码 (支持 URL-Safe 格式)
+# 安全参数提取函数 (强制转换为小写，专用于比较和类型匹配)
+get_query_param_lc() {
+  get_query_param "$1" "$2" | tr '[:upper:]' '[:lower:]'
+}
+
+# 安全 Base64 解码
 safe_base64_decode() {
   local input="$1"
   input=$(echo "$input" | tr '-_' '+/')
@@ -121,12 +135,15 @@ CURRENT_SB_PID=""
 
 for single_node in "${NODE_ARRAY[@]}"; do
   single_node=$(echo "$single_node" | tr -d '[:space:]')
-  [ -z "$single_node" ] && continue
+  if [ -z "$single_node" ]; then
+    continue
+  fi
   
   node_idx=$((node_idx + 1))
   echo "----------------------------------------"
   echo "[INFO] 正在尝试节点 [$node_idx / $total_nodes] ..."
 
+  # 协议头自动转小写
   proto=$(echo "$single_node" | cut -d':' -f1 | tr '[:upper:]' '[:lower:]')
   content="${single_node#*://}"
   content="${content%%#*}"
@@ -171,38 +188,66 @@ for single_node in "${NODE_ARRAY[@]}"; do
       outbound_type="vless"
 
       if [ -n "$query" ]; then
-        flow=$(get_query_param "$query" "flow"); if [ -n "$flow" ]; then outbound_flow="$flow"; fi
-        ttype=$(get_query_param "$query" "type"); if [ -n "$ttype" ]; then outbound_transport_type="$ttype"; fi
+        flow=$(get_query_param "$query" "flow")
+        if [ -n "$flow" ]; then outbound_flow="$flow"; fi
+        
+        ttype=$(get_query_param_lc "$query" "type")
+        if [ -n "$ttype" ]; then outbound_transport_type="$ttype"; fi
+        
         path_raw=$(get_query_param "$query" "path")
-        if [ -n "$path_raw" ]; then path_decoded=$(url_decode "$path_raw"); outbound_path="${path_decoded%%\?*}"; fi
-        host=$(get_query_param "$query" "host"); if [ -n "$host" ]; then outbound_host="$host"; fi
-        sec=$(get_query_param "$query" "security"); if [ -n "$sec" ]; then outbound_security="$sec"; fi
-        sni=$(get_query_param "$query" "sni"); if [ -n "$sni" ]; then outbound_sni="$sni"; fi
-        fp=$(get_query_param "$query" "fp"); if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
-        pbk=$(get_query_param "$query" "pbk"); if [ -n "$pbk" ]; then outbound_reality_pbk="$pbk"; fi
-        sid=$(get_query_param "$query" "sid"); if [ -n "$sid" ]; then outbound_reality_sid="$sid"; fi
-        ins=$(get_query_param "$query" "insecure")
-        alins=$(get_query_param "$query" "allowinsecure")
-        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then outbound_insecure="true"; fi
+        if [ -n "$path_raw" ]; then 
+          path_decoded=$(url_decode "$path_raw")
+          outbound_path="${path_decoded%%\?*}"
+        fi
+        
+        host=$(get_query_param "$query" "host")
+        if [ -n "$host" ]; then outbound_host="$host"; fi
+        
+        sec=$(get_query_param_lc "$query" "security")
+        if [ -n "$sec" ]; then outbound_security="$sec"; fi
+        
+        sni=$(get_query_param "$query" "sni")
+        if [ -n "$sni" ]; then outbound_sni="$sni"; fi
+        
+        fp=$(get_query_param_lc "$query" "fp")
+        if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
+        
+        pbk=$(get_query_param "$query" "pbk")
+        if [ -n "$pbk" ]; then outbound_reality_pbk="$pbk"; fi
+        
+        sid=$(get_query_param "$query" "sid")
+        if [ -n "$sid" ]; then outbound_reality_sid="$sid"; fi
+        
+        ins=$(get_query_param_lc "$query" "insecure")
+        alins=$(get_query_param_lc "$query" "allowinsecure")
+        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then 
+          outbound_insecure="true"
+        fi
       fi
-      [ -z "$outbound_host" ] && outbound_host="$outbound_server"
-      [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
+      if [ -z "$outbound_host" ]; then outbound_host="$outbound_server"; fi
+      if [ -z "$outbound_sni" ]; then outbound_sni="$outbound_server"; fi
       ;;
 
     vmess)
       decoded=$(safe_base64_decode "$content")
-      if [ -z "$decoded" ]; then echo "[WARN] VMess Base64 解码失败，跳过该节点"; continue; fi
+      if [ -z "$decoded" ]; then 
+        echo "[WARN] VMess Base64 解码失败，跳过该节点"
+        continue
+      fi
       
-      add=$(echo "$decoded" | jq -r '.add // ""' 2>/dev/null || true)
-      if [ -z "$add" ]; then echo "[WARN] VMess JSON 解析失败，跳过该节点"; continue; fi
+      add=$(echo "$decoded" | jq -r '.add // ""' 2>/dev/null || echo "")
+      if [ -z "$add" ]; then 
+        echo "[WARN] VMess JSON 解析失败，跳过该节点"
+        continue
+      fi
       
-      port=$(echo "$decoded" | jq -r '.port // 443' 2>/dev/null || true)
-      id=$(echo "$decoded" | jq -r '.id // ""' 2>/dev/null || true)
-      net=$(echo "$decoded" | jq -r '.net // "tcp"' 2>/dev/null || true)
-      tls=$(echo "$decoded" | jq -r '.tls // ""' 2>/dev/null || true)
-      sni=$(echo "$decoded" | jq -r '.sni // ""' 2>/dev/null || true)
-      host=$(echo "$decoded" | jq -r '.host // ""' 2>/dev/null || true)
-      path_raw=$(echo "$decoded" | jq -r '.path // "/"' 2>/dev/null || true)
+      port=$(echo "$decoded" | jq -r '.port // 443' 2>/dev/null || echo "443")
+      id=$(echo "$decoded" | jq -r '.id // ""' 2>/dev/null || echo "")
+      net=$(echo "$decoded" | jq -r '.net // "tcp"' 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "tcp")
+      tls=$(echo "$decoded" | jq -r '.tls // ""' 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "")
+      sni=$(echo "$decoded" | jq -r '.sni // ""' 2>/dev/null || echo "")
+      host=$(echo "$decoded" | jq -r '.host // ""' 2>/dev/null || echo "")
+      path_raw=$(echo "$decoded" | jq -r '.path // "/"' 2>/dev/null || echo "/")
       path_decoded=$(url_decode "$path_raw")
       
       outbound_type="vmess"
@@ -213,7 +258,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       outbound_path="${path_decoded%%\?*}"
       outbound_host="${host:-$add}"
       outbound_sni="${sni:-$add}"
-      outbound_fingerprint=$(echo "$decoded" | jq -r '.fp // "chrome"' 2>/dev/null || echo "chrome")
+      outbound_fingerprint=$(echo "$decoded" | jq -r '.fp // "chrome"' 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "chrome")
       outbound_security="$tls"
       ;;
 
@@ -228,18 +273,32 @@ for single_node in "${NODE_ARRAY[@]}"; do
       outbound_type="trojan"
 
       if [ -n "$query" ]; then
-        ttype=$(get_query_param "$query" "type"); if [ -n "$ttype" ]; then outbound_transport_type="$ttype"; fi
+        ttype=$(get_query_param_lc "$query" "type")
+        if [ -n "$ttype" ]; then outbound_transport_type="$ttype"; fi
+        
         path_raw=$(get_query_param "$query" "path")
-        if [ -n "$path_raw" ]; then path_decoded=$(url_decode "$path_raw"); outbound_path="${path_decoded%%\?*}"; fi
-        host=$(get_query_param "$query" "host"); if [ -n "$host" ]; then outbound_host="$host"; fi
-        sni=$(get_query_param "$query" "sni"); if [ -n "$sni" ]; then outbound_sni="$sni"; fi
-        fp=$(get_query_param "$query" "fp"); if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
-        ins=$(get_query_param "$query" "insecure")
-        alins=$(get_query_param "$query" "allowinsecure")
-        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then outbound_insecure="true"; fi
+        if [ -n "$path_raw" ]; then 
+          path_decoded=$(url_decode "$path_raw")
+          outbound_path="${path_decoded%%\?*}"
+        fi
+        
+        host=$(get_query_param "$query" "host")
+        if [ -n "$host" ]; then outbound_host="$host"; fi
+        
+        sni=$(get_query_param "$query" "sni")
+        if [ -n "$sni" ]; then outbound_sni="$sni"; fi
+        
+        fp=$(get_query_param_lc "$query" "fp")
+        if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
+        
+        ins=$(get_query_param_lc "$query" "insecure")
+        alins=$(get_query_param_lc "$query" "allowinsecure")
+        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then 
+          outbound_insecure="true"
+        fi
       fi
-      [ -z "$outbound_host" ] && outbound_host="$outbound_server"
-      [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
+      if [ -z "$outbound_host" ]; then outbound_host="$outbound_server"; fi
+      if [ -z "$outbound_sni" ]; then outbound_sni="$outbound_server"; fi
       ;;
 
     hysteria2|hy2)
@@ -252,20 +311,28 @@ for single_node in "${NODE_ARRAY[@]}"; do
       outbound_auth="$auth"
 
       if [ -n "$query" ]; then
-        obfs=$(get_query_param "$query" "obfs"); if [ -n "$obfs" ]; then outbound_obfs_password="$obfs"; fi
-        sni=$(get_query_param "$query" "sni"); if [ -n "$sni" ]; then outbound_sni="$sni"; fi
-        fp=$(get_query_param "$query" "fp"); if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
-        ins=$(get_query_param "$query" "insecure")
-        alins=$(get_query_param "$query" "allowinsecure")
-        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then outbound_insecure="true"; fi
-        # 补全对 Query 中密码的解析
+        obfs=$(get_query_param "$query" "obfs")
+        if [ -n "$obfs" ]; then outbound_obfs_password="$obfs"; fi
+        
+        sni=$(get_query_param "$query" "sni")
+        if [ -n "$sni" ]; then outbound_sni="$sni"; fi
+        
+        fp=$(get_query_param_lc "$query" "fp")
+        if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
+        
+        ins=$(get_query_param_lc "$query" "insecure")
+        alins=$(get_query_param_lc "$query" "allowinsecure")
+        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then 
+          outbound_insecure="true"
+        fi
+        
         if [ -z "$outbound_auth" ]; then
           q_pass=$(get_query_param "$query" "password")
-          [ -z "$q_pass" ] && q_pass=$(get_query_param "$query" "auth")
-          [ -n "$q_pass" ] && outbound_auth="$q_pass"
+          if [ -z "$q_pass" ]; then q_pass=$(get_query_param "$query" "auth"); fi
+          if [ -n "$q_pass" ]; then outbound_auth="$q_pass"; fi
         fi
       fi
-      [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
+      if [ -z "$outbound_sni" ]; then outbound_sni="$outbound_server"; fi
       ;;
 
     tuic)
@@ -279,15 +346,50 @@ for single_node in "${NODE_ARRAY[@]}"; do
       outbound_type="tuic"
 
       if [ -n "$query" ]; then
-        sni=$(get_query_param "$query" "sni"); if [ -n "$sni" ]; then outbound_sni="$sni"; fi
-        fp=$(get_query_param "$query" "fp"); if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
-        ins=$(get_query_param "$query" "insecure")
-        alins=$(get_query_param "$query" "allowinsecure")
-        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then outbound_insecure="true"; fi
-        cc=$(get_query_param "$query" "congestion_control"); if [ -n "$cc" ]; then outbound_congestion="$cc"; fi
-        alpn=$(get_query_param "$query" "alpn"); if [ -n "$alpn" ]; then outbound_alpn="$alpn"; fi
+        sni=$(get_query_param "$query" "sni")
+        if [ -n "$sni" ]; then outbound_sni="$sni"; fi
+        
+        fp=$(get_query_param_lc "$query" "fp")
+        if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
+        
+        ins=$(get_query_param_lc "$query" "insecure")
+        alins=$(get_query_param_lc "$query" "allowinsecure")
+        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then 
+          outbound_insecure="true"
+        fi
+        
+        cc=$(get_query_param_lc "$query" "congestion_control")
+        if [ -n "$cc" ]; then outbound_congestion="$cc"; fi
+        
+        alpn=$(get_query_param_lc "$query" "alpn")
+        if [ -n "$alpn" ]; then outbound_alpn="$alpn"; fi
       fi
-      [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
+      if [ -z "$outbound_sni" ]; then outbound_sni="$outbound_server"; fi
+      ;;
+
+    anytls)
+      password="${content%%@*}"
+      rest="${content#*@}"
+      if [[ "$rest" == *"?"* ]]; then host_port="${rest%%\?*}"; query="${rest#*\?}"; else host_port="$rest"; query=""; fi
+      
+      parse_host_port "$host_port" "443"
+      outbound_password="$password"
+      outbound_type="anytls"
+
+      if [ -n "$query" ]; then
+        sni=$(get_query_param "$query" "sni")
+        if [ -n "$sni" ]; then outbound_sni="$sni"; fi
+        
+        fp=$(get_query_param_lc "$query" "fp")
+        if [ -n "$fp" ]; then outbound_fingerprint="$fp"; fi
+        
+        ins=$(get_query_param_lc "$query" "insecure")
+        alins=$(get_query_param_lc "$query" "allowinsecure")
+        if [ "$ins" = "1" ] || [ "$ins" = "true" ] || [ "$alins" = "1" ] || [ "$alins" = "true" ]; then 
+          outbound_insecure="true"
+        fi
+      fi
+      if [ -z "$outbound_sni" ]; then outbound_sni="$outbound_server"; fi
       ;;
 
     socks5|socks)
@@ -325,13 +427,20 @@ for single_node in "${NODE_ARRAY[@]}"; do
   case "$outbound_type" in
     vless)
       jq_outbound="$jq_outbound,\"uuid\":\"$outbound_uuid\""
-      [ -n "$outbound_flow" ] && jq_outbound="$jq_outbound,\"flow\":\"$outbound_flow\""
+      if [ -n "$outbound_flow" ]; then 
+        jq_outbound="$jq_outbound,\"flow\":\"$outbound_flow\""
+      fi
       if [ "$outbound_transport_type" != "tcp" ]; then 
         jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
       fi
-      tls_enabled="false"; [ "$outbound_security" = "tls" ] || [ "$outbound_security" = "reality" ] && tls_enabled="true"
+      tls_enabled="false"
+      if [ "$outbound_security" = "tls" ] || [ "$outbound_security" = "reality" ]; then 
+        tls_enabled="true"
+      fi
       tls_json="{\"enabled\":$tls_enabled,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}"
-      [ "$outbound_security" = "reality" ] && tls_json="$tls_json,\"reality\":{\"enabled\":true,\"public_key\":\"$outbound_reality_pbk\",\"short_id\":\"$outbound_reality_sid\"}"
+      if [ "$outbound_security" = "reality" ]; then 
+        tls_json="$tls_json,\"reality\":{\"enabled\":true,\"public_key\":\"$outbound_reality_pbk\",\"short_id\":\"$outbound_reality_sid\"}"
+      fi
       tls_json="$tls_json}"
       jq_outbound="$jq_outbound,\"tls\":$tls_json"
       ;;
@@ -340,7 +449,10 @@ for single_node in "${NODE_ARRAY[@]}"; do
       if [ "$outbound_transport_type" != "tcp" ]; then
         jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
       fi
-      tls_enabled="false"; [ "$outbound_security" = "tls" ] && tls_enabled="true"
+      tls_enabled="false"
+      if [ "$outbound_security" = "tls" ]; then 
+        tls_enabled="true"
+      fi
       jq_outbound="$jq_outbound,\"tls\":{\"enabled\":$tls_enabled,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
       ;;
     trojan)
@@ -352,22 +464,38 @@ for single_node in "${NODE_ARRAY[@]}"; do
       ;;
     hysteria2)
       jq_outbound="$jq_outbound,\"up_mbps\":$outbound_up_mbps,\"down_mbps\":$outbound_down_mbps"
-      [ -n "$outbound_obfs_password" ] && jq_outbound="$jq_outbound,\"obfs\":{\"type\":\"salamander\",\"password\":\"$outbound_obfs_password\"}"
-      [ -n "$outbound_auth" ] && jq_outbound="$jq_outbound,\"password\":\"$outbound_auth\""
+      if [ -n "$outbound_obfs_password" ]; then 
+        jq_outbound="$jq_outbound,\"obfs\":{\"type\":\"salamander\",\"password\":\"$outbound_obfs_password\"}"
+      fi
+      if [ -n "$outbound_auth" ]; then 
+        jq_outbound="$jq_outbound,\"password\":\"$outbound_auth\""
+      fi
       jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure}"
       ;;
     tuic)
       jq_outbound="$jq_outbound,\"uuid\":\"$outbound_uuid\""
-      [ -n "$outbound_password2" ] && jq_outbound="$jq_outbound,\"password\":\"$outbound_password2\""
+      if [ -n "$outbound_password2" ]; then 
+        jq_outbound="$jq_outbound,\"password\":\"$outbound_password2\""
+      fi
       jq_outbound="$jq_outbound,\"congestion_control\":\"$outbound_congestion\",\"udp_over_stream\":$outbound_udp_over_stream,\"zero_rtt_handshake\":$outbound_zerortt"
       tls_json="{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure"
-      [ -n "$outbound_alpn" ] && tls_json="$tls_json,\"alpn\":[\"$outbound_alpn\"]"
+      if [ -n "$outbound_alpn" ]; then 
+        tls_json="$tls_json,\"alpn\":[\"$outbound_alpn\"]"
+      fi
       tls_json="$tls_json}"
       jq_outbound="$jq_outbound,\"tls\":$tls_json"
       ;;
+    anytls)
+      jq_outbound="$jq_outbound,\"password\":\"$outbound_password\""
+      jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
+      ;;
     socks)
-      [ -n "$outbound_username" ] && jq_outbound="$jq_outbound,\"username\":\"$outbound_username\""
-      [ -n "$outbound_password2" ] && jq_outbound="$jq_outbound,\"password\":\"$outbound_password2\""
+      if [ -n "$outbound_username" ]; then 
+        jq_outbound="$jq_outbound,\"username\":\"$outbound_username\""
+      fi
+      if [ -n "$outbound_password2" ]; then 
+        jq_outbound="$jq_outbound,\"password\":\"$outbound_password2\""
+      fi
       jq_outbound="$jq_outbound,\"version\":\"$outbound_version\""
       ;;
   esac
@@ -384,7 +512,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
 }
 EOF
 
-  # 进程安全清理
+  # 进程清理
   if [ -n "$CURRENT_SB_PID" ]; then
     kill -9 "$CURRENT_SB_PID" 2>/dev/null || true
   fi
@@ -401,7 +529,7 @@ EOF
 
   if ! kill -0 $CURRENT_SB_PID 2>/dev/null; then
     echo "[WARN] ❌ sing-box 启动失败 (可能是节点配置参数不受支持)，跳过该节点..."
-    [ -f sing-box.log ] && tail -n 5 sing-box.log
+    if [ -f sing-box.log ]; then tail -n 5 sing-box.log; fi
     continue
   fi
 
@@ -421,7 +549,7 @@ EOF
     exit 0
   else
     echo "[WARN] ❌ 节点 [$node_idx] 无法连接或超时，尝试下一个节点..."
-    [ -s sing-box.log ] && tail -n 3 sing-box.log
+    if [ -s sing-box.log ]; then tail -n 3 sing-box.log; fi
   fi
 done
 
