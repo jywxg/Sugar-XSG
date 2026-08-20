@@ -1,24 +1,23 @@
 import os
 import re
 import json
-import time
 from datetime import datetime, timezone, timedelta
 import requests
 
 # ==========================================
 # 1. 环境变量与全局参数配置
 # ==========================================
-XSERVER_ACCOUNT_RAW = os.getenv("XSERVER_GAME_ACCOUNT", "")
-TG_BOT_RAW = os.getenv("TG_BOT", "{}")
-CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "")
-CF_SCRIPT_NAME = os.getenv("CF_SCRIPT_NAME", "")
-CF_API_TOKEN = os.getenv("CF_API_TOKEN", "")
+XSERVER_ACCOUNT_RAW = os.getenv("XSERVER_GAME_ACCOUNT", "").strip()
+TG_BOT_RAW = os.getenv("TG_BOT", "").strip()
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
+CF_SCRIPT_NAME = os.getenv("CF_SCRIPT_NAME", "").strip()
+CF_API_TOKEN = os.getenv("CF_API_TOKEN", "").strip()
 
 # 兼容 USE_PROXY 和 IS_PROXY 环境变量
 USE_PROXY_ENV = os.getenv("USE_PROXY", "false").lower() == "true" or \
                 os.getenv("IS_PROXY", "false").lower() == "true"
-PROXY_SERVER = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080")
-PROXY_STATUS_ENV = os.getenv("PROXY_STATUS", f"代理: {PROXY_SERVER}")
+PROXY_SERVER = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080").strip()
+PROXY_STATUS_ENV = os.getenv("PROXY_STATUS", f"代理: {PROXY_SERVER}").strip()
 
 # 解析账号信息 (支持 "username,password" 或 JSON 字符串格式)
 XSERVER_USER = ""
@@ -33,6 +32,9 @@ if XSERVER_ACCOUNT_RAW:
             XSERVER_USER, XSERVER_PASS = XSERVER_ACCOUNT_RAW.split(",", 1)
         else:
             XSERVER_USER = XSERVER_ACCOUNT_RAW
+
+XSERVER_USER = XSERVER_USER.strip()
+XSERVER_PASS = XSERVER_PASS.strip()
 
 # 初始化全局 requests Session
 session = requests.Session()
@@ -62,7 +64,7 @@ if USE_PROXY_ENV:
         else:
             print(f"✅ 代理连接 XServer 成功，未被拦截！(HTTP {test_res.status_code})")
             final_proxy_status = PROXY_STATUS_ENV
-            session.proxies.update(proxies) # 只有测试通过才在全局 session 启用代理
+            session.proxies.update(proxies) # 测试通过才在全局 session 启用代理
             
     except Exception as e:
         print(f"⚠️ 代理连接超时或网络异常 ({e})，自动降级为直连！")
@@ -75,13 +77,17 @@ else:
 # 3. Telegram 消息推送模块
 # ==========================================
 def send_tg_notification(server_info, expire_date, remaining_str, result_status, next_cron_info=""):
+    if not TG_BOT_RAW:
+        print("⚠️ 未配置 Telegram 机器人密钥，跳过 TG 通知。")
+        return
+        
     try:
         tg_config = json.loads(TG_BOT_RAW)
-        bot_token = tg_config.get("bot_token")
-        chat_id = tg_config.get("chat_id")
+        bot_token = tg_config.get("bot_token", "").strip()
+        chat_id = str(tg_config.get("chat_id", "")).strip()
         
         if not bot_token or not chat_id:
-            print("⚠️ 未配置 Telegram 机器人密钥，跳过 TG 通知。")
+            print("⚠️ Telegram 密钥解析结果为空，跳过通知。请检查 JSON 格式。")
             return
 
         now_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
@@ -111,9 +117,11 @@ def send_tg_notification(server_info, expire_date, remaining_str, result_status,
         if resp.ok:
             print("📨 TG 推送成功")
         else:
-            print(f"⚠️ TG 推送失败: {resp.text}")
+            print(f"⚠️ TG 推送失败 (HTTP {resp.status_code}): {resp.text}")
+    except json.JSONDecodeError as e:
+        print(f"⚠️ TG_BOT Secret JSON 格式解析失败: {e}。请检查 GitHub Secrets 中的 TG_BOT 配置！")
     except Exception as e:
-        print(f"⚠️ 发送 TG 通知过程异常: {e}")
+        print(f"⚠️ 发送 TG 通知过程发生未捕获异常: {e}")
 
 
 # ==========================================
@@ -124,8 +132,9 @@ def update_cf_worker_cron(total_remaining_minutes):
         print("⚠️ 未完整配置 Cloudflare API 参数，跳过更新 Worker Cron 触发器。")
         return ""
 
-    # 计算触发时间：提前 210 分钟（3.5小时），且最小等待 10 分钟
-    wait_minutes = max(10, total_remaining_minutes - 210)
+    # 如果解析失败（剩余分钟为 0 且未进入续期逻辑），10 分钟后立即重试
+    wait_minutes = 10 if total_remaining_minutes <= 0 else max(10, total_remaining_minutes - 210)
+    
     next_utc = datetime.now(timezone.utc) + timedelta(minutes=wait_minutes)
     cron_expr = f"{next_utc.minute} {next_utc.hour} {next_utc.day} {next_utc.month} *"
 
@@ -162,9 +171,13 @@ def main():
         send_tg_notification("", "", "", "❌ 缺少账号/密码配置")
         return
 
+    # 警告提示：如果你把 IP 当作账号输入了，大概率会登录失败
+    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', XSERVER_USER):
+        print("⚠️ 警告: 检测到登录账号格式为 IP 地址，正常的 XServer 账号应为注册邮箱（Email）！请检查 Secrets 配置。")
+
     server_id = "未知"
     expire_date_str = "未知"
-    remaining_str = "未知"
+    remaining_str = "解析失败"
     result_status = "未知"
     total_remaining_minutes = 0
 
@@ -201,13 +214,19 @@ def main():
         if ip_match:
             server_id = ip_match.group(1)
 
-        date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})(?:まで)?', panel_resp.text)
+        # 优化正则表达式：兼容 2026-08-21、2026/08/21 及 2026年08月21日 等多国语言格式
+        date_match = re.search(r'(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})', panel_resp.text)
         if date_match:
-            expire_date_str = date_match.group(1) + "まで"
-            expire_date_raw = date_match.group(1).replace('/', '-')
+            raw_date = date_match.group(1)
+            # 统一标准化为 YYYY-MM-DD 格式
+            clean_date = raw_date.replace('年', '-').replace('月', '-').replace('日', '').replace('/', '-')
+            parts = clean_date.split('-')
+            formatted_date = f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"
+            
+            expire_date_str = f"{formatted_date}まで"
             
             # 依照日本 JST 时区 (UTC+9) 计算精确倒计时
-            expire_dt = datetime.strptime(f"{expire_date_raw} 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=9)))
+            expire_dt = datetime.strptime(f"{formatted_date} 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=9)))
             now_dt = datetime.now(timezone(timedelta(hours=9)))
             diff_sec = (expire_dt - now_dt).total_seconds()
             
@@ -215,29 +234,32 @@ def main():
             hours = total_remaining_minutes // 60
             mins = total_remaining_minutes % 60
             remaining_str = f"{hours} 小时 {mins} 分"
+            print(f"📅 当前利用期限：{expire_date_str}")
+            print(f"⏳ 剩余时间：{remaining_str}")
         else:
-            remaining_str = "解析失败"
+            print("⚠️ 未能在面板页面中匹配到日期，可能页面结构已变更或未创建实例。")
 
-        print(f"📅 当前利用期限：{expire_date_str}")
-        print(f"⏳ 剩余时间：{remaining_str}")
-
-        # 5. 校验阈值并在剩余 < 4 小时 (240 分钟) 时触发续期
-        if 0 < total_remaining_minutes <= 240:
-            print("⚠️ 剩余时长已低于 4 小时，开始提交续期请求...")
-            renew_url = "https://secure.xserver.ne.jp/xapanel/xgame/renew"
-            renew_resp = session.post(renew_url, data={"server_id": server_id}, timeout=15)
-            
-            if renew_resp.ok:
-                result_status = "🎉 续期成功！"
-                print("✅ 续期提交成功！")
-                total_remaining_minutes += 2880 # 续期成功后累加 48 小时
+        # 5. 校验阈值触发续期 (判断逻辑已修正)
+        if total_remaining_minutes > 0:
+            if total_remaining_minutes <= 240:
+                print("⚠️ 剩余时长已低于 4 小时，开始提交续期请求...")
+                renew_url = "https://secure.xserver.ne.jp/xapanel/xgame/renew"
+                renew_resp = session.post(renew_url, data={"server_id": server_id}, timeout=15)
+                
+                if renew_resp.ok:
+                    result_status = "🎉 续期成功！"
+                    print("✅ 续期提交成功！")
+                    total_remaining_minutes += 2880 # 续期成功后累加 48 小时
+                else:
+                    result_status = f"❌ 续期请求失败 (HTTP {renew_resp.status_code})"
+                    print("❌ 续期提交失败。")
             else:
-                result_status = f"❌ 续期请求失败 (HTTP {renew_resp.status_code})"
-                print("❌ 续期提交失败。")
+                hours_left = total_remaining_minutes // 60
+                result_status = "⌛️ 期限未至（无需续期）"
+                print(f"ℹ️  剩余 {hours_left} 小时，未低于阈值，无需续期")
         else:
-            hours_left = total_remaining_minutes // 60
-            result_status = "⌛️ 期限未至（无需续期）"
-            print(f"ℹ️  剩余 {hours_left} 小时，未低于阈值，无需续期")
+            result_status = "⚠️ 时间解析失败或已到期"
+            print("ℹ️  由于未能正确解析有效期限，跳过续期判定，将于 10 分钟后重新尝试。")
 
         # 6. 计算下一次临界时间并写回 Cloudflare Cron
         next_cron_info = update_cf_worker_cron(total_remaining_minutes)
