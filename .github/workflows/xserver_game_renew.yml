@@ -62,7 +62,7 @@ jobs:
             git push origin HEAD:main
           fi
 
-      - name: 🧹 精准清理历史运行记录
+      - name: 🧹 清理历史运行记录
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
