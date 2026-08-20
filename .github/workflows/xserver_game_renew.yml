@@ -5,9 +5,10 @@ on:
   repository_dispatch:
     types: [renew-trigger] # 接收来自 Cloudflare Worker 的唤醒信号
 
-# 🔑 赋予 GitHub Actions 提交并推送代码的写入权限
+# 🔑 赋予 GitHub Actions 推送代码及清理 Workflow 历史记录的写权限
 permissions:
   contents: write
+  actions: write
 
 jobs:
   renew:
@@ -24,7 +25,7 @@ jobs:
           python-version: '3.x'
 
       - name: 📦 安装依赖
-        run: pip install requests --quiet
+        run: pip install "requests[socks]" --quiet
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
@@ -37,14 +38,15 @@ jobs:
         env:
           XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }}
           NODE_LINK: ${{ secrets.NODE_LINK }}
-          IS_PROXY: ${{ secrets.IS_PROXY }}
+          IS_PROXY: ${{ env.USE_PROXY }}
+          PROXY_STATUS: ${{ env.PROXY_STATUS }}
           TG_BOT: ${{ secrets.TG_BOT }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_SCRIPT_NAME: ${{ secrets.CF_SCRIPT_NAME }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python3 xserver_game_renew.py
 
-      - name: ⏱️ 更新运行记录 (防止 Actions 被封停)
+      - name: ⏱️ 更新运行记录 (保活 Actions)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -59,3 +61,11 @@ jobs:
             git pull origin main --rebase
             git push origin HEAD:main
           fi
+
+      - name: 🧹 清理历史运行记录 (仅保留最近 1 条)
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 1
