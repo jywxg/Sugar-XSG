@@ -46,7 +46,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python3 xserver_game_renew.py
 
-      - name: ⏱️ 更新运行记录 (防止 Actions 被封停)
+      - name: ⏱️ 更新运行记录
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -62,7 +62,7 @@ jobs:
             git push origin HEAD:main
           fi
 
-      - name: 🧹 精准清理历史运行记录 (绝对只保留本次)
+      - name: 🧹 精准清理历史运行记录
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
