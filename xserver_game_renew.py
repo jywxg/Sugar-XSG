@@ -51,8 +51,6 @@ IP_CHECK_URL = "https://ipinfo.io/json"
 
 RENEW_THRESHOLD_HOURS = 4
 
-NODE_LINK = os.environ.get("NODE_LINK", "")
-
 # 代理配置判断（兼容 USE_PROXY 和 IS_PROXY）
 is_proxy_enabled = os.getenv("USE_PROXY", "").lower() in ["true", "1", "yes"] or os.getenv("IS_PROXY", "").lower() in ["true", "1", "yes"]
 USE_PROXY = is_proxy_enabled
@@ -248,19 +246,27 @@ def run_account(account) -> bool:
     ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"] = check_ip_info()
 
     if USE_PROXY:
-        log("🌐 检测代理是否可用...")
+        log("🌐 检测代理是否可用及目标网站联通性...")
         proxy_ip, proxy_country = check_ip_info(ctx["PROXIES"])
         if proxy_ip != "未知":
             try:
-                if requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]).status_code == 200:
+                # 针对目标网站进行真实探测
+                test_resp = requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+                
+                # 严密判断：不仅要求状态码 200，且页面必须包含登录必需的 uniqid 字段（证明没被 WAF 拦截页替代）
+                if test_resp.status_code == 200 and 'name="uniqid"' in test_resp.text:
                     ctx["PROXY_AVAILABLE"] = True
                     ctx["PROXY_IP"], ctx["PROXY_COUNTRY"] = proxy_ip, proxy_country
                     ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "代理", proxy_ip, proxy_country
-            except Exception:
-                pass
+                    log("✅ 代理测试通过，未被目标网站屏蔽")
+                else:
+                    log(f"⚠️ 代理被目标网站屏蔽或拦截 (状态码: {test_resp.status_code})")
+            except Exception as e:
+                log("⚠️ 代理访问目标网站超时或网络异常")
 
-        # 若检测代理不可用，降级为直连
+        # 若检测代理不可用或被屏蔽，执行退回直连逻辑
         if not ctx["PROXY_AVAILABLE"]:
+            log("🔄 放弃代理，自动退回 [直连] 模式运行...")
             ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "直连", ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"]
             ctx["PROXIES"] = {}
     else:
