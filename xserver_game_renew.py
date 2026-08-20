@@ -19,7 +19,7 @@ USE_PROXY_ENV = os.getenv("USE_PROXY", "false").lower() == "true" or \
 PROXY_SERVER = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080").strip()
 PROXY_STATUS_ENV = os.getenv("PROXY_STATUS", f"代理: {PROXY_SERVER}").strip()
 
-# 解析账号信息 (支持 "username,password" 或 JSON 字符串格式)
+# 解析账号信息 (完美兼容 "标签,邮箱,密码" 或 JSON 格式)
 XSERVER_USER = ""
 XSERVER_PASS = ""
 if XSERVER_ACCOUNT_RAW:
@@ -28,13 +28,23 @@ if XSERVER_ACCOUNT_RAW:
         XSERVER_USER = acc_json.get("username", "") or acc_json.get("account", "") or acc_json.get("user", "")
         XSERVER_PASS = acc_json.get("password", "") or acc_json.get("pass", "")
     except json.JSONDecodeError:
-        if "," in XSERVER_ACCOUNT_RAW:
-            XSERVER_USER, XSERVER_PASS = XSERVER_ACCOUNT_RAW.split(",", 1)
+        parts = [p.strip() for p in XSERVER_ACCOUNT_RAW.split(",")]
+        if len(parts) >= 3:
+            # 格式: 标签/IP, 邮箱, 密码 -> 取第 2 个作为真实登录邮箱
+            XSERVER_USER = parts[1]
+            XSERVER_PASS = ",".join(parts[2:])
+        elif len(parts) == 2:
+            # 格式: 邮箱, 密码
+            XSERVER_USER = parts[0]
+            XSERVER_PASS = parts[1]
         else:
             XSERVER_USER = XSERVER_ACCOUNT_RAW
 
 XSERVER_USER = XSERVER_USER.strip()
 XSERVER_PASS = XSERVER_PASS.strip()
+
+# 自动清洗 TG_BOT 中的隐藏换行符、回车符和制表符，防止 JSON 解析报错
+TG_BOT_CLEAN = re.sub(r'[\r\n\t]+', '', TG_BOT_RAW)
 
 # 初始化全局 requests Session
 session = requests.Session()
@@ -57,14 +67,13 @@ if USE_PROXY_ENV:
     try:
         test_res = session.get("https://secure.xserver.ne.jp/xapanel/login/xgame/", proxies=proxies, timeout=10)
         
-        # 判断代理 IP 是否被 XServer 防火墙拉黑/拦截
         if test_res.status_code in [403, 429]:
             print(f"⚠️ 代理 IP 被 XServer 屏蔽 (HTTP {test_res.status_code})，自动降级为直连！")
             final_proxy_status = f"直连 (原{PROXY_STATUS_ENV}被屏蔽)"
         else:
             print(f"✅ 代理连接 XServer 成功，未被拦截！(HTTP {test_res.status_code})")
             final_proxy_status = PROXY_STATUS_ENV
-            session.proxies.update(proxies) # 测试通过才在全局 session 启用代理
+            session.proxies.update(proxies) 
             
     except Exception as e:
         print(f"⚠️ 代理连接超时或网络异常 ({e})，自动降级为直连！")
@@ -77,12 +86,12 @@ else:
 # 3. Telegram 消息推送模块
 # ==========================================
 def send_tg_notification(server_info, expire_date, remaining_str, result_status, next_cron_info=""):
-    if not TG_BOT_RAW:
+    if not TG_BOT_CLEAN:
         print("⚠️ 未配置 Telegram 机器人密钥，跳过 TG 通知。")
         return
         
     try:
-        tg_config = json.loads(TG_BOT_RAW)
+        tg_config = json.loads(TG_BOT_CLEAN)
         bot_token = tg_config.get("bot_token", "").strip()
         chat_id = str(tg_config.get("chat_id", "")).strip()
         
@@ -132,9 +141,7 @@ def update_cf_worker_cron(total_remaining_minutes):
         print("⚠️ 未完整配置 Cloudflare API 参数，跳过更新 Worker Cron 触发器。")
         return ""
 
-    # 如果解析失败（剩余分钟为 0 且未进入续期逻辑），10 分钟后立即重试
     wait_minutes = 10 if total_remaining_minutes <= 0 else max(10, total_remaining_minutes - 210)
-    
     next_utc = datetime.now(timezone.utc) + timedelta(minutes=wait_minutes)
     cron_expr = f"{next_utc.minute} {next_utc.hour} {next_utc.day} {next_utc.month} *"
 
@@ -171,10 +178,6 @@ def main():
         send_tg_notification("", "", "", "❌ 缺少账号/密码配置")
         return
 
-    # 警告提示：如果你把 IP 当作账号输入了，大概率会登录失败
-    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', XSERVER_USER):
-        print("⚠️ 警告: 检测到登录账号格式为 IP 地址，正常的 XServer 账号应为注册邮箱（Email）！请检查 Secrets 配置。")
-
     server_id = "未知"
     expire_date_str = "未知"
     remaining_str = "解析失败"
@@ -198,8 +201,9 @@ def main():
         }
         login_resp = session.post(login_page_url, data=login_data, timeout=15)
 
-        if "logout" not in login_resp.text.lower() and "会員ID" in login_resp.text:
-            raise Exception("登录校验失败，请检查账号密码或验证码。")
+        # 严格校验是否登录成功
+        if "logout" not in login_resp.text.lower() and "xapanel" not in login_resp.url.lower():
+            raise Exception("登录校验失败！网页返回提示账号或密码错误。请检查邮箱和密码配置！")
         print("✅ 登录成功")
 
         # 3. 获取控制台主页
@@ -214,18 +218,15 @@ def main():
         if ip_match:
             server_id = ip_match.group(1)
 
-        # 优化正则表达式：兼容 2026-08-21、2026/08/21 及 2026年08月21日 等多国语言格式
         date_match = re.search(r'(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})', panel_resp.text)
         if date_match:
             raw_date = date_match.group(1)
-            # 统一标准化为 YYYY-MM-DD 格式
             clean_date = raw_date.replace('年', '-').replace('月', '-').replace('日', '').replace('/', '-')
             parts = clean_date.split('-')
             formatted_date = f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"
             
             expire_date_str = f"{formatted_date}まで"
             
-            # 依照日本 JST 时区 (UTC+9) 计算精确倒计时
             expire_dt = datetime.strptime(f"{formatted_date} 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=9)))
             now_dt = datetime.now(timezone(timedelta(hours=9)))
             diff_sec = (expire_dt - now_dt).total_seconds()
@@ -237,9 +238,9 @@ def main():
             print(f"📅 当前利用期限：{expire_date_str}")
             print(f"⏳ 剩余时间：{remaining_str}")
         else:
-            print("⚠️ 未能在面板页面中匹配到日期，可能页面结构已变更或未创建实例。")
+            print("⚠️ 未能在面板页面中匹配到日期，可能页面结构已变更或该账号下未创建实例。")
 
-        # 5. 校验阈值触发续期 (判断逻辑已修正)
+        # 5. 校验阈值触发续期
         if total_remaining_minutes > 0:
             if total_remaining_minutes <= 240:
                 print("⚠️ 剩余时长已低于 4 小时，开始提交续期请求...")
