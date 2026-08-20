@@ -5,6 +5,10 @@ on:
   repository_dispatch:
     types: [renew-trigger] # 接收来自 Cloudflare Worker 的唤醒信号
 
+# 🔑 赋予 GitHub Actions 提交并推送代码的写入权限
+permissions:
+  contents: write
+
 jobs:
   renew:
     runs-on: ubuntu-latest
