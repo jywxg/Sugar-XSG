@@ -5,7 +5,7 @@ on:
   repository_dispatch:
     types: [renew-trigger] # 接收来自 Cloudflare Worker 的唤醒信号
 
-# 🔑 赋予 GitHub Actions 推送代码及清理 Workflow 历史记录的写权限
+# 🔑 赋予 GitHub Actions 提交代码及清理 Workflow 历史记录的写入权限
 permissions:
   contents: write
   actions: write
@@ -46,7 +46,7 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python3 xserver_game_renew.py
 
-      - name: ⏱️ 更新运行记录 (保活 Actions)
+      - name: ⏱️ 更新运行记录 (防止 Actions 被封停)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -62,10 +62,17 @@ jobs:
             git push origin HEAD:main
           fi
 
-      - name: 🧹 清理历史运行记录 (仅保留最近 1 条)
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          retain_days: 0
-          keep_minimum_runs: 1
+      - name: 🧹 精准清理历史运行记录 (绝对只保留本次)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 获取最多 100 条工作流记录 ID
+          runs=$(gh run list -L 100 --json databaseId --jq '.[].databaseId')
+          
+          # 遍历删除，遇到当前正在运行的 ID ($GITHUB_RUN_ID) 则跳过
+          for run in $runs; do
+            if [ "$run" != "$GITHUB_RUN_ID" ]; then
+              echo "🗑️ 正在删除多余的历史记录 ID: $run"
+              gh run delete "$run" || true
+            fi
+          done
