@@ -1,85 +1,57 @@
-name: XServer-Game-Renew #[span_1](start_span)[span_1](end_span)
-on: #[span_2](start_span)[span_2](end_span)
-  workflow_dispatch: #[span_3](start_span)[span_3](end_span)
-  schedule: #[span_4](start_span)[span_4](end_span)
-  - cron: "0 19,7 * * *"  # UTC 时间，对应北京时间 03:00 / 15:00[span_5](start_span)[span_5](end_span)
+name: XServer-Game-Renew
 
-permissions: #[span_6](start_span)[span_6](end_span)
-  actions: write #[span_7](start_span)[span_7](end_span)
-  contents: write  # 允许工作流向仓库提交和推送代码[span_8](start_span)[span_8](end_span)
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [renew-trigger] # 接收来自 Cloudflare Worker 的唤醒信号
 
-jobs: #[span_9](start_span)[span_9](end_span)
-  renew: #[span_10](start_span)[span_10](end_span)
-    runs-on: ubuntu-latest #[span_11](start_span)[span_11](end_span)
-    timeout-minutes: 5 #[span_12](start_span)[span_12](end_span)
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
-    steps: #[span_13](start_span)[span_13](end_span)
-      - name: 📥 拉取仓库 #[span_14](start_span)[span_14](end_span)
-        uses: actions/checkout@v4 #[span_15](start_span)[span_15](end_span)
+    steps:
+      - name: 📥 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 🐍 安装 Python 环境
+        uses: actions/setup-python@v5
         with:
-          # --- 如果修改后仍报错，说明是分支保护限制 ---
-          # 请前往 GitHub Developer Settings 生成一个具有 read/write 权限的 Personal Access Token (PAT)
-          # 添加到当前仓库的 Secrets 中（命名为 MY_PAT），并取消下方注释：
-          # token: ${{ secrets.MY_PAT }}
-          fetch-depth: 0 # 获取完整历史，防止 rebase 找不到远端历史记录
+          python-version: '3.x'
 
-      - name: 🐍 安装 Python 依赖 #[span_16](start_span)[span_16](end_span)
-        run: pip install requests --quiet #[span_17](start_span)[span_17](end_span)
+      - name: 📦 安装依赖
+        run: pip install requests --quiet
 
-      - name: ⚙ 设置代理 (sing-box) #[span_18](start_span)[span_18](end_span)
-        continue-on-error: true #[span_19](start_span)[span_19](end_span)
-        env: #[span_20](start_span)[span_20](end_span)
-          NODE_LINK: ${{ secrets.NODE_LINK }} #[span_21](start_span)[span_21](end_span)
-        run: | #[span_22](start_span)[span_22](end_span)
-          bash setup_proxy.sh #[span_23](start_span)[span_23](end_span)
+      - name: ⚙ 设置代理 (sing-box)
+        continue-on-error: true
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          bash setup_proxy.sh
 
-      - name: 🔧 执行续期 #[span_24](start_span)[span_24](end_span)
-        env: #[span_25](start_span)[span_25](end_span)
-          XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }} #[span_26](start_span)[span_26](end_span)
-          NODE_LINK: ${{ secrets.NODE_LINK }} #[span_27](start_span)[span_27](end_span)
-          TG_BOT: ${{ secrets.TG_BOT }} #[span_28](start_span)[span_28](end_span)
-        run: python3 xserver_game_renew.py #[span_29](start_span)[span_29](end_span)
+      - name: 🔧 执行续期
+        env:
+          XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }}
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          IS_PROXY: ${{ secrets.IS_PROXY }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_SCRIPT_NAME: ${{ secrets.CF_SCRIPT_NAME }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: python3 xserver_game_renew.py
 
-      - name: ⏱️ 更新运行记录 #[span_30](start_span)[span_30](end_span)
-        env: #[span_31](start_span)[span_31](end_span)
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} #[span_32](start_span)[span_32](end_span)
-        run: | #[span_33](start_span)[span_33](end_span)
-          git config user.name "github-actions[bot]" #[span_34](start_span)[span_34](end_span)
-          git config user.email "github-actions[bot]@users.noreply.github.com" #[span_35](start_span)[span_35](end_span)
-
-          if [ ! -f time.txt ]; then #[span_36](start_span)[span_36](end_span)
-            echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt #[span_37](start_span)[span_37](end_span)
-          else #[span_38](start_span)[span_38](end_span)
-            echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt #[span_39](start_span)[span_39](end_span)
-          fi #[span_40](start_span)[span_40](end_span)
-
-          git add time.txt #[span_41](start_span)[span_41](end_span)
-
-          if git diff --cached --quiet; then #[span_42](start_span)[span_42](end_span)
-            echo "无变化，无需提交" #[span_43](start_span)[span_43](end_span)
-          else #[span_44](start_span)[span_44](end_span)
-            git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')" #[span_45](start_span)[span_45](end_span)
-            
-            # --- 关键修改：推送前先 rebase 远端分支，解决并发冲突导致的 fatal error ---
+      - name: ⏱️ 更新运行记录 (防止 Actions 被封停)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "最后运行时间: $(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          git add time.txt
+          if git diff --cached --quiet; then
+            echo "无变化，无需提交"
+          else
+            git commit -m "⏱️ 自动更新运行记录，保活 Actions [skip ci]"
             git pull origin main --rebase
-            
-            git push origin HEAD:main #[span_46](start_span)[span_46](end_span)
-          fi #[span_47](start_span)[span_47](end_span)
-
-      - name: 🧹 清理旧工作流运行记录 #[span_48](start_span)[span_48](end_span)
-        if: always() #[span_49](start_span)[span_49](end_span)
-        env: #[span_50](start_span)[span_50](end_span)
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} #[span_51](start_span)[span_51](end_span)
-        run: | #[span_52](start_span)[span_52](end_span)
-          echo "开始清理旧的 GitHub Actions 运行记录..." #[span_53](start_span)[span_53](end_span)
-          gh api --paginate \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/actions/runs?per_page=100" \
-            --jq '.workflow_runs[] | select(.status=="completed") | .id' | while read id #[span_54](start_span)[span_54](end_span)
-          do #[span_55](start_span)[span_55](end_span)
-            echo "删除运行记录: $id" #[span_56](start_span)[span_56](end_span)
-            gh api --method DELETE \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/${{ github.repository }}/actions/runs/$id" || true #[span_57](start_span)[span_57](end_span)
-          done #[span_58](start_span)[span_58](end_span)
-          echo "清理完成" #[span_59](start_span)[span_59](end_span)
+            git push origin HEAD:main
+          fi
