@@ -1,279 +1,430 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import datetime
 import os
 import re
-import json
-from datetime import datetime, timezone, timedelta
+import sys
+import time
 import requests
 
-# ==========================================
-# 1. 环境变量与全局参数配置
-# ==========================================
-XSERVER_ACCOUNT_RAW = os.getenv("XSERVER_GAME_ACCOUNT", "").strip()
-TG_BOT_RAW = os.getenv("TG_BOT", "").strip()
-CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
-CF_SCRIPT_NAME = os.getenv("CF_SCRIPT_NAME", "").strip()
-CF_API_TOKEN = os.getenv("CF_API_TOKEN", "").strip()
+XSERVER_GAME_ACCOUNT = os.environ.get("XSERVER_GAME_ACCOUNT", "")
+if not XSERVER_GAME_ACCOUNT:
+    print(
+        "❌ 请设置 GitHub Secret: XSERVER_GAME_ACCOUNT（格式:"
+        " 自定义名称,email,password）"
+    )
+    sys.exit(1)
 
-# 兼容 USE_PROXY 和 IS_PROXY 环境变量
-USE_PROXY_ENV = os.getenv("USE_PROXY", "false").lower() == "true" or \
-                os.getenv("IS_PROXY", "false").lower() == "true"
-PROXY_SERVER = os.getenv("PROXY_SERVER", "socks5://127.0.0.1:1080").strip()
-PROXY_STATUS_ENV = os.getenv("PROXY_STATUS", f"代理: {PROXY_SERVER}").strip()
+ACCOUNTS = []
+for item in re.split(r"[\n;]+", XSERVER_GAME_ACCOUNT.strip()):
+    item = item.strip()
+    if not item:
+        continue
+    parts = item.split(",", 2)
+    if len(parts) < 3:
+        print(
+            "❌ XSERVER_GAME_ACCOUNT 格式错误，应为: 自定义名称,email,password"
+        )
+        sys.exit(1)
+    ACCOUNTS.append({
+        "name": parts[0].strip(),
+        "email": parts[1].strip(),
+        "password": parts[2].strip(),
+    })
 
-# 解析账号信息 (完美兼容 "标签,邮箱,密码" 或 JSON 格式)
-XSERVER_USER = ""
-XSERVER_PASS = ""
-if XSERVER_ACCOUNT_RAW:
-    try:
-        acc_json = json.loads(XSERVER_ACCOUNT_RAW)
-        XSERVER_USER = acc_json.get("username", "") or acc_json.get("account", "") or acc_json.get("user", "")
-        XSERVER_PASS = acc_json.get("password", "") or acc_json.get("pass", "")
-    except json.JSONDecodeError:
-        parts = [p.strip() for p in XSERVER_ACCOUNT_RAW.split(",")]
-        if len(parts) >= 3:
-            # 格式: 标签/IP, 邮箱, 密码 -> 取第 2 个作为真实登录邮箱
-            XSERVER_USER = parts[1]
-            XSERVER_PASS = ",".join(parts[2:])
-        elif len(parts) == 2:
-            # 格式: 邮箱, 密码
-            XSERVER_USER = parts[0]
-            XSERVER_PASS = parts[1]
-        else:
-            XSERVER_USER = XSERVER_ACCOUNT_RAW
+if not ACCOUNTS:
+    print("❌ 没有有效账号")
+    sys.exit(1)
 
-XSERVER_USER = XSERVER_USER.strip()
-XSERVER_PASS = XSERVER_PASS.strip()
+BASE_URL = "https://secure.xserver.ne.jp"
+LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xserver/?request_page=xserver%2Findex"
+LOGIN_URL = f"{BASE_URL}/xapanel/myaccount/login"
+XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
+ONETIMELOGIN_URL = f"{BASE_URL}/xmgame/onetimelogin"
+INFO_URL = f"{BASE_URL}/xmgame/game/index"
+EXTEND_URL = f"{BASE_URL}/xmgame/game/freeplan/extend/index"
+RENEW_URL = f"{BASE_URL}/xmgame/game/freeplan/extend/input"
+CONF_URL = f"{BASE_URL}/xmgame/game/freeplan/extend/conf"
+DO_URL = f"{BASE_URL}/xmgame/game/freeplan/extend/do"
+IP_CHECK_URL = "https://ipinfo.io/json"
 
-# 自动清洗 TG_BOT 中的隐藏换行符、回车符和制表符，防止 JSON 解析报错
-TG_BOT_CLEAN = re.sub(r'[\r\n\t]+', '', TG_BOT_RAW)
+RENEW_THRESHOLD_HOURS = 4
 
-# 初始化全局 requests Session
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-    "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8"
-})
+NODE_LINK = os.environ.get("NODE_LINK", "")
 
-# ==========================================
-# 2. 代理防屏蔽与连通性检测
-# ==========================================
-final_proxy_status = "直连"
+# 代理配置判断（兼容 USE_PROXY 和 IS_PROXY）
+is_proxy_enabled = os.getenv("USE_PROXY", "").lower() in ["true", "1", "yes"] or os.getenv("IS_PROXY", "").lower() in ["true", "1", "yes"]
+USE_PROXY = is_proxy_enabled
 
-if USE_PROXY_ENV:
-    proxies = {
-        "http": PROXY_SERVER,
-        "https": PROXY_SERVER
-    }
-    print(f"🔄 正在测试代理连接 XServer 是否可用: {PROXY_SERVER}")
-    try:
-        test_res = session.get("https://secure.xserver.ne.jp/xapanel/login/xgame/", proxies=proxies, timeout=10)
-        
-        if test_res.status_code in [403, 429]:
-            print(f"⚠️ 代理 IP 被 XServer 屏蔽 (HTTP {test_res.status_code})，自动降级为直连！")
-            final_proxy_status = f"直连 (原{PROXY_STATUS_ENV}被屏蔽)"
-        else:
-            print(f"✅ 代理连接 XServer 成功，未被拦截！(HTTP {test_res.status_code})")
-            final_proxy_status = PROXY_STATUS_ENV
-            session.proxies.update(proxies) 
-            
-    except Exception as e:
-        print(f"⚠️ 代理连接超时或网络异常 ({e})，自动降级为直连！")
-        final_proxy_status = f"直连 (原{PROXY_STATUS_ENV}连通失败)"
-else:
-    print("🌐 未启用代理，使用直连模式。")
+# 移除全局修改代理的逻辑，改为每个账号独立生成
+def get_proxy_config():
+    return {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"} if USE_PROXY else {}
 
+TG_BOT = os.environ.get("TG_BOT", "")
 
-# ==========================================
-# 3. Telegram 消息推送模块
-# ==========================================
-def send_tg_notification(server_info, expire_date, remaining_str, result_status, next_cron_info=""):
-    if not TG_BOT_CLEAN:
-        print("⚠️ 未配置 Telegram 机器人密钥，跳过 TG 通知。")
+BASE_HEADERS = {
+    "accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "user-agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        " (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+    ),
+    "cache-control": "no-cache",
+    "pragma": "no-cache",
+    "sec-ch-ua": (
+        '"Chromium";v="148", "Google Chrome";v="148", "Not;A=Brand";v="99"'
+    ),
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
+}
+
+DEFAULT_TIMEOUT = 30
+SLOW_TIMEOUT = 60
+SCRIPT_NAME = os.path.basename(__file__)
+
+# 收集所有账号的剩余时间，用于计算最小 Cron
+NEXT_RUN_MINUTES = []
+
+def log(msg):
+    print(msg, flush=True)
+
+def divider(label):
+    width = 60
+    inner = f" {{{label}}} "
+    pad_total = width - len(inner)
+    pad_l = pad_total // 2
+    pad_r = pad_total - pad_l
+    log("=" * pad_l + inner + "=" * pad_r)
+
+def now_str():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def parse_remaining(page_html: str) -> tuple:
+    deadline = re.search(
+        r'<span class="dateLimit">\(([^)]+)\)</span>', page_html
+    )
+    dl_str = deadline.group(1) if deadline else "未知"
+
+    if "limitOverTxt" in page_html and "期限切れ" in page_html:
+        return -1, -1, dl_str, True
+
+    numbers = re.findall(r'<span class="numberTxt">(\d+)</span>', page_html)
+    if len(numbers) >= 2:
+        return int(numbers[0]), int(numbers[1]), dl_str, False
+
+    return -2, -2, dl_str, False
+
+def can_renew(page_html: str) -> bool:
+    return "残り契約時間が4時間を切るまで" not in page_html
+
+def update_cf_cron(remaining_hours: int, remaining_minutes: int):
+    cf_account_id = os.environ.get("CF_ACCOUNT_ID", "")
+    cf_script_name = os.environ.get("CF_SCRIPT_NAME", "")
+    cf_api_token = os.environ.get("CF_API_TOKEN", "")
+
+    if not all([cf_account_id, cf_script_name, cf_api_token]):
+        log("\n⚠️ 未配置完整的 Cloudflare 变量，跳过 Cron 更新")
         return
-        
-    try:
-        tg_config = json.loads(TG_BOT_CLEAN)
-        bot_token = tg_config.get("bot_token", "").strip()
-        chat_id = str(tg_config.get("chat_id", "")).strip()
-        
-        if not bot_token or not chat_id:
-            print("⚠️ Telegram 密钥解析结果为空，跳过通知。请检查 JSON 格式。")
-            return
 
-        now_str = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-        
-        msg = f"🎮 *XServer Game 续期通知*\n"
-        msg += f"━━━━━━━━━━━━━━━━━━\n"
-        if server_info:
-            msg += f"🖥 服务器名称: `{server_info}`\n"
-        if expire_date:
-            msg += f"📅 到期时间(有效期): {expire_date}\n"
-        if remaining_str:
-            msg += f"⏳ 剩余有效时长: {remaining_str}\n"
-        msg += f"📊 续期结果: {result_status}\n"
-        if next_cron_info:
-            msg += f"⏱️ 下次触发(UTC): {next_cron_info}\n"
-        msg += f"🕐 执行时间: {now_str}\n"
-        msg += f"━━━━━━━━━━━━━━━━━━\n"
-        msg += f"🌐 网络状态: {final_proxy_status}"
+    if remaining_hours < 0:
+        cron_str = "0 */2 * * *"
+        log("\n⚠️ 账号状态异常或未取得剩余时间，Cron 兜底设为每 2 小时运行: 0 */2 * * *")
+    else:
+        total_remaining_minutes = remaining_hours * 60 + remaining_minutes
+        wait_minutes = max(10, total_remaining_minutes - 210)
 
-        tg_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        resp = requests.post(tg_url, json={
-            "chat_id": chat_id,
-            "text": msg,
-            "parse_mode": "Markdown"
-        }, timeout=10)
-        
-        if resp.ok:
-            print("📨 TG 推送成功")
-        else:
-            print(f"⚠️ TG 推送失败 (HTTP {resp.status_code}): {resp.text}")
-    except json.JSONDecodeError as e:
-        print(f"⚠️ TG_BOT Secret JSON 格式解析失败: {e}。请检查 GitHub Secrets 中的 TG_BOT 配置！")
-    except Exception as e:
-        print(f"⚠️ 发送 TG 通知过程发生未捕获异常: {e}")
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        next_run_utc = now_utc + datetime.timedelta(minutes=wait_minutes)
+        cron_str = f"{next_run_utc.minute} {next_run_utc.hour} {next_run_utc.day} {next_run_utc.month} *"
+        log(f"\n⏱️ 预计下次续期触发时间 (UTC): {next_run_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+        log(f"⏱️ 写入 CF 的 Cron 表达式: {cron_str}")
 
-
-# ==========================================
-# 4. Cloudflare Worker 定时器更新模块
-# ==========================================
-def update_cf_worker_cron(total_remaining_minutes):
-    if not (CF_ACCOUNT_ID and CF_SCRIPT_NAME and CF_API_TOKEN):
-        print("⚠️ 未完整配置 Cloudflare API 参数，跳过更新 Worker Cron 触发器。")
-        return ""
-
-    wait_minutes = 10 if total_remaining_minutes <= 0 else max(10, total_remaining_minutes - 210)
-    next_utc = datetime.now(timezone.utc) + timedelta(minutes=wait_minutes)
-    cron_expr = f"{next_utc.minute} {next_utc.hour} {next_utc.day} {next_utc.month} *"
-
-    print(f"\n⏱️ 预计下次续期触发时间 (UTC): {next_utc.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⏱️ 写入 CF 的 Cron 表达式: {cron_expr}")
-
-    cf_url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/workers/scripts/{CF_SCRIPT_NAME}/schedules"
+    url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/workers/scripts/{cf_script_name}/schedules"
     headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {cf_api_token}",
+        "Content-Type": "application/json",
     }
+
     try:
-        resp = requests.put(cf_url, json=[{"cron": cron_expr}], headers=headers, timeout=15)
-        if resp.ok and resp.json().get("success"):
-            print("✅ 成功更新 Cloudflare Worker 的定时触发器！")
-            return next_utc.strftime("%Y-%m-%d %H:%M:%S")
+        resp = requests.put(url, json=[{"cron": cron_str}], headers=headers, timeout=15)
+        if resp.ok:
+            log("✅ 成功更新 Cloudflare Worker 的定时触发器！")
         else:
-            print(f"❌ 更新 CF 定时器失败: {resp.text}")
+            log(f"❌ 更新 Cloudflare Cron 失败: {resp.status_code} - {resp.text}")
     except Exception as e:
-        print(f"❌ 请求 CF API 发生异常: {e}")
-    return ""
+        log(f"❌ 调用 Cloudflare API 出错: {e}")
 
-
-# ==========================================
-# 5. 主程序业务流程
-# ==========================================
-def main():
-    now_time = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"============== {{xserver_game_renew.py starts}} ==============")
-    print(f"🕐 运行时间: {now_time}")
-
-    if not XSERVER_USER or not XSERVER_PASS:
-        print("❌ 错误：未读取到有效的 XSERVER_GAME_ACCOUNT 环境变量！")
-        send_tg_notification("", "", "", "❌ 缺少账号/密码配置")
+def notify_tg(ctx: dict, result: str, deadline: str, remaining_str: str):
+    if not TG_BOT:
         return
+    parts = TG_BOT.split(",", 1)
+    if len(parts) != 2:
+        return
+    chat_id, bot_token = parts[0].strip(), parts[1].strip()
 
-    server_id = "未知"
-    expire_date_str = "未知"
-    remaining_str = "解析失败"
-    result_status = "未知"
-    total_remaining_minutes = 0
+    proxy_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("PROXY_IP", "未知"))
+    direct_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("DIRECT_IP", "未知"))
+    actual_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("ACTUAL_IP", "未知"))
 
+    network_info = []
+    if USE_PROXY:
+        proxy_status = "✅ 可用" if ctx.get("PROXY_AVAILABLE") else "❌ 不可用/被屏蔽"
+        network_info.append(f"🔀 代理: {proxy_status}")
+        if ctx.get("PROXY_AVAILABLE"):
+            network_info.append(f"   IP: {proxy_masked} ({ctx.get('PROXY_COUNTRY', '未知')})")
+        network_info.append(f"🌐 直连: IP {direct_masked} ({ctx.get('DIRECT_COUNTRY', '未知')})")
+        network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
+        if ctx.get("ACTUAL_MODE") == "代理":
+            network_info.append(f"   IP: {actual_masked} ({ctx.get('ACTUAL_COUNTRY', '未知')})")
+    else:
+        network_info.append(f"🌐 直连: IP {direct_masked} ({ctx.get('DIRECT_COUNTRY', '未知')})")
+        network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
+
+    network_str = "\n".join(network_info)
+
+    message = (
+        f"🎮 XServer Game 续期通知\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🖥 服务器名称: {ctx.get('SERVER_NAME')}\n"
+        f"📅 到期时间(有效期): {deadline}\n"
+        f"⏳ 剩余有效时长: {remaining_str}\n"
+        f"📊 续期结果: {result}\n"
+        f"🕐 执行时间: {now_str()}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{network_str}"
+    )
     try:
-        # 1. 访问登录页面提取 CSRF Token
-        login_page_url = "https://secure.xserver.ne.jp/xapanel/login/xgame/"
-        resp = session.get(login_page_url, timeout=15)
-        
-        token_match = re.search(r'name="token"\s+value="([^"]+)"', resp.text)
-        token = token_match.group(1) if token_match else ""
-
-        # 2. 提交登录请求
-        print(f"🔑 正在登录... 账号: {XSERVER_USER}")
-        login_data = {
-            "memberid": XSERVER_USER,
-            "user_password": XSERVER_PASS,
-            "token": token
-        }
-        login_resp = session.post(login_page_url, data=login_data, timeout=15)
-
-        # 严格校验是否登录成功
-        if "logout" not in login_resp.text.lower() and "xapanel" not in login_resp.url.lower():
-            raise Exception("登录校验失败！网页返回提示账号或密码错误。请检查邮箱和密码配置！")
-        print("✅ 登录成功")
-
-        # 3. 获取控制台主页
-        panel_url = "https://secure.xserver.ne.jp/xapanel/xgame/index"
-        panel_resp = session.get(panel_url, timeout=15)
-        print("🔗 跳转到游戏面板...")
-        print("✅ 游戏面板 Session 获取成功")
-
-        # 4. 读取服务器列表及剩余时间
-        print("📋 读取服务器信息...")
-        ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', panel_resp.text)
-        if ip_match:
-            server_id = ip_match.group(1)
-
-        date_match = re.search(r'(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})', panel_resp.text)
-        if date_match:
-            raw_date = date_match.group(1)
-            clean_date = raw_date.replace('年', '-').replace('月', '-').replace('日', '').replace('/', '-')
-            parts = clean_date.split('-')
-            formatted_date = f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"
-            
-            expire_date_str = f"{formatted_date}まで"
-            
-            expire_dt = datetime.strptime(f"{formatted_date} 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=9)))
-            now_dt = datetime.now(timezone(timedelta(hours=9)))
-            diff_sec = (expire_dt - now_dt).total_seconds()
-            
-            total_remaining_minutes = max(0, int(diff_sec // 60))
-            hours = total_remaining_minutes // 60
-            mins = total_remaining_minutes % 60
-            remaining_str = f"{hours} 小时 {mins} 分"
-            print(f"📅 当前利用期限：{expire_date_str}")
-            print(f"⏳ 剩余时间：{remaining_str}")
-        else:
-            print("⚠️ 未能在面板页面中匹配到日期，可能页面结构已变更或该账号下未创建实例。")
-
-        # 5. 校验阈值触发续期
-        if total_remaining_minutes > 0:
-            if total_remaining_minutes <= 240:
-                print("⚠️ 剩余时长已低于 4 小时，开始提交续期请求...")
-                renew_url = "https://secure.xserver.ne.jp/xapanel/xgame/renew"
-                renew_resp = session.post(renew_url, data={"server_id": server_id}, timeout=15)
-                
-                if renew_resp.ok:
-                    result_status = "🎉 续期成功！"
-                    print("✅ 续期提交成功！")
-                    total_remaining_minutes += 2880 # 续期成功后累加 48 小时
-                else:
-                    result_status = f"❌ 续期请求失败 (HTTP {renew_resp.status_code})"
-                    print("❌ 续期提交失败。")
-            else:
-                hours_left = total_remaining_minutes // 60
-                result_status = "⌛️ 期限未至（无需续期）"
-                print(f"ℹ️  剩余 {hours_left} 小时，未低于阈值，无需续期")
-        else:
-            result_status = "⚠️ 时间解析失败或已到期"
-            print("ℹ️  由于未能正确解析有效期限，跳过续期判定，将于 10 分钟后重新尝试。")
-
-        # 6. 计算下一次临界时间并写回 Cloudflare Cron
-        next_cron_info = update_cf_worker_cron(total_remaining_minutes)
-
-        # 7. 推送 Telegram 消息通知
-        send_tg_notification(server_id, expire_date_str, remaining_str, result_status, next_cron_info)
-
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": message},
+            timeout=10,
+            proxies=ctx.get("PROXIES", {}) # 使用隔离的代理配置发通知
+        )
+        log("📨 TG 推送成功")
     except Exception as e:
-        result_status = f"❌ 运行异常: {str(e)}"
-        print(f"❌ 脚本运行遇到异常: {e}")
-        send_tg_notification(server_id, expire_date_str, remaining_str, result_status)
+        log(f"⚠️ TG 推送失败: {e}")
 
-    print(f"========= {{xserver_game_renew.py passed}} =========")
+def finish_account(ctx: dict, success: bool, result: str, deadline: str, remaining_str: str) -> bool:
+    notify_tg(ctx, result, deadline, remaining_str)
+    tag = "passed" if success else "failed"
+    elapsed_time = f"{time.time() - ctx['START_TIME']:.2f}s"
+    divider(f"{SCRIPT_NAME} {tag} in {elapsed_time}")
+    return success
+
+def check_ip_info(proxies=None):
+    try:
+        resp = requests.get(IP_CHECK_URL, timeout=DEFAULT_TIMEOUT, proxies=proxies)
+        ip_data = resp.json()
+        return ip_data.get("ip", "未知"), ip_data.get("country", "未知")
+    except Exception:
+        return "未知", "未知"
+
+def run_account(account) -> bool:
+    # 隔离上下文变量，防止跨账号污染
+    ctx = {
+        "SERVER_NAME": account["name"],
+        "START_TIME": time.time(),
+        "PROXIES": get_proxy_config(),
+        "PROXY_AVAILABLE": False,
+        "ACTUAL_MODE": "直连",
+        "ACTUAL_IP": "未知",
+        "ACTUAL_COUNTRY": "未知",
+        "DIRECT_IP": "未知",
+        "DIRECT_COUNTRY": "未知"
+    }
+
+    divider(f"{SCRIPT_NAME} starts")
+    log(f"🕐 运行时间: {now_str()}")
+    log(f"🖥 服务器: {ctx['SERVER_NAME']}")
+
+    ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"] = check_ip_info()
+
+    if USE_PROXY:
+        log("🌐 检测代理是否可用...")
+        proxy_ip, proxy_country = check_ip_info(ctx["PROXIES"])
+        if proxy_ip != "未知":
+            try:
+                if requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]).status_code == 200:
+                    ctx["PROXY_AVAILABLE"] = True
+                    ctx["PROXY_IP"], ctx["PROXY_COUNTRY"] = proxy_ip, proxy_country
+                    ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "代理", proxy_ip, proxy_country
+            except Exception:
+                pass
+
+        # 若检测代理不可用，降级为直连
+        if not ctx["PROXY_AVAILABLE"]:
+            ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "直连", ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"]
+            ctx["PROXIES"] = {}
+    else:
+        ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "直连", ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"]
+
+    # --- 登录与跳转逻辑，优化: 封装到带 session 管理的作用域中 ---
+    with requests.Session() as session:
+        session.headers.update(BASE_HEADERS)
+        session.max_redirects = 10
+
+        email_masked = re.sub(r"(.{2}).*(@.*)", r"\1***\2", account["email"])
+        log(f"🔑 正在登录... 账号: {email_masked}")
+        time.sleep(1)
+
+        try:
+            resp = session.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+            uniqid_match = re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text)
+            if not uniqid_match:
+                NEXT_RUN_MINUTES.append(-1)
+                return finish_account(ctx, False, "❌ 未找到登录 uniqid", "未知", "0小时0分")
+
+            session.post(
+                LOGIN_URL,
+                headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": LOGIN_PAGE},
+                data={"request_page": "xserver/index", "site": "", "uniqid": uniqid_match.group(1), "memberid": account["email"], "user_password": account["password"], "service_login": "xserver", "action_user_login": "%A5%ED%A5%B0%A5%A4%A5%F3%A4%B9%A4%EB"},
+                allow_redirects=True, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]
+            )
+            if not session.cookies.get("X2SESSID"):
+                NEXT_RUN_MINUTES.append(-1)
+                return finish_account(ctx, False, "❌ 登录失败，未获取到 Cookies", "未知", "0小时0分")
+            log("✅ 登录成功")
+
+            # 跳转面板
+            log("🔗 跳转到游戏面板...")
+            time.sleep(1.5)
+            resp = session.get(XMGAME_INDEX_URL, headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"], allow_redirects=True)
+            jumpvps_match = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", resp.text)
+            if not jumpvps_match:
+                NEXT_RUN_MINUTES.append(-1)
+                return finish_account(ctx, False, "❌ 未找到 jumpvps 链接", "未知", "0小时0分")
+
+            server_id = jumpvps_match.group(1)
+            time.sleep(1)
+            resp2 = session.get(f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}", headers={**BASE_HEADERS, "referer": XMGAME_INDEX_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"], allow_redirects=True)
+
+            uname = re.search(r'name="username"\s+value="([^"]+)"', resp2.text)
+            s_iden = re.search(r'name="server_identify"\s+value="([^"]+)"', resp2.text)
+            pwd = re.search(r'name="password"\s+value="([^"]+)"', resp2.text)
+            srv = re.search(r'name="service"\s+value="([^"]+)"', resp2.text)
+
+            if not all([uname, s_iden, pwd, srv]):
+                NEXT_RUN_MINUTES.append(-1)
+                return finish_account(ctx, False, "❌ onetimelogin 表单解析失败", "未知", "0小时0分")
+
+            session.post(
+                ONETIMELOGIN_URL,
+                headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}"},
+                data={"username": uname.group(1), "server_identify": s_iden.group(1), "password": pwd.group(1), "service": srv.group(1), "master_panel_username": "", "back": ""},
+                allow_redirects=True, timeout=SLOW_TIMEOUT, proxies=ctx["PROXIES"]
+            )
+
+            if not (session.cookies.get("X2%2Fxmgame_SESSID") or session.cookies.get("X2/xmgame_SESSID")):
+                NEXT_RUN_MINUTES.append(-1)
+                return finish_account(ctx, False, "❌ 面板 Session 获取失败", "未知", "0小时0分")
+            log("✅ 游戏面板 Session 获取成功")
+        except Exception as e:
+            log(f"❌ 登录网络异常: {e}")
+            NEXT_RUN_MINUTES.append(-1)
+            return finish_account(ctx, False, "❌ 登录抛出异常", "未知", "0小时0分")
+
+        # ----------------- 数据处理与续期 -----------------
+        log("📋 读取服务器信息...")
+        time.sleep(1)
+        resp_info = session.get(INFO_URL, headers={**BASE_HEADERS, "referer": BASE_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+        resp_info.encoding = "EUC-JP"
+        h_before, m_before, dl_before, is_expired = parse_remaining(resp_info.text)
+
+        if h_before == -2:
+            log("❌ 解析剩余时间失败，页面结构异常")
+            NEXT_RUN_MINUTES.append(-1)
+            return finish_account(ctx, False, "❌ 页面数据解析失败", "未知", "0小时0分")
+
+        remaining_str_before = f"{h_before} 小时 {m_before} 分"
+
+        if is_expired:
+            log(f"⚠️ 服务器已过期（{dl_before}），直接尝试续期...")
+        else:
+            log(f"📅 当前利用期限：{dl_before}")
+            log(f"⏳ 剩余时间：{remaining_str_before}")
+            if h_before >= RENEW_THRESHOLD_HOURS:
+                log(f"ℹ️  剩余 {h_before} 小时，未低于阈值，无需续期")
+                NEXT_RUN_MINUTES.append(h_before * 60 + m_before)
+                return finish_account(ctx, True, "⌛️ 期限未至（无需续期）", dl_before, remaining_str_before)
+
+            time.sleep(1)
+            resp_extend = session.get(EXTEND_URL, headers={**BASE_HEADERS, "referer": INFO_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+            resp_extend.encoding = "EUC-JP"
+            if not can_renew(resp_extend.text):
+                log("⚠️ 页面提示暂不可续期")
+                NEXT_RUN_MINUTES.append(h_before * 60 + m_before)
+                return finish_account(ctx, True, "⌛️ 期限未至（暂不可续期）", dl_before, remaining_str_before)
+
+        log("🔄 开始续期...")
+        try:
+            time.sleep(1)
+            resp_renew = session.get(RENEW_URL, headers={**BASE_HEADERS, "referer": EXTEND_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+            login_token = re.search(r'name="login_token"\s+value="([^"]+)"', resp_renew.text)
+            if not login_token:
+                NEXT_RUN_MINUTES.append(-1)
+                return finish_account(ctx, False, "❌ 未找到续期 Token", dl_before, remaining_str_before)
+
+            time.sleep(1)
+            session.post(CONF_URL, headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": RENEW_URL}, data={"ethna_csrf": "", "login_token": login_token.group(1), "period": "48"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+            time.sleep(1)
+            session.post(DO_URL, headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": CONF_URL}, data={"ethna_csrf": "", "period": "48"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+        except Exception as e:
+            log(f"❌ 续期请求异常: {e}")
+            NEXT_RUN_MINUTES.append(-1)
+            return finish_account(ctx, False, "❌ 续期请求抛出异常", dl_before, remaining_str_before)
+
+        log("⏳ 等待系统更新...")
+        time.sleep(3)
+
+        resp_after = session.get(INFO_URL, headers={**BASE_HEADERS, "referer": BASE_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+        resp_after.encoding = "EUC-JP"
+        h_after, m_after, dl_after, expired_after = parse_remaining(resp_after.text)
+        log(f"📅 续期后利用期限：{dl_after}")
+        remaining_str_after = f"{h_after} 小时 {m_after} 分"
+
+        success = False
+        if is_expired and not expired_after: success = True
+        elif dl_after != dl_before: success = True
+        elif not expired_after: success = True
+
+        if success:
+            log("✅ 续期成功！")
+            NEXT_RUN_MINUTES.append(h_after * 60 + m_after)
+            return finish_account(ctx, True, "✅ 续期成功！", dl_after, remaining_str_after)
+        else:
+            log("❌ 续期失败，时间未变化")
+            NEXT_RUN_MINUTES.append(-1)
+            return finish_account(ctx, False, "❌ 续期后期限未延伸", dl_after or dl_before, remaining_str_after)
+
+def main():
+    failed = 0
+    for account in ACCOUNTS:
+        start_len = len(NEXT_RUN_MINUTES)
+        try:
+            ok = run_account(account)
+            if not ok: failed += 1
+        except Exception as e:
+            failed += 1
+            log(f"❌ 账号 {account['name']} 运行遇到致命错误: {e}")
+
+        if len(NEXT_RUN_MINUTES) == start_len:
+            NEXT_RUN_MINUTES.append(-1)
+
+    if not NEXT_RUN_MINUTES or -1 in NEXT_RUN_MINUTES:
+        update_cf_cron(-1, -1)
+    else:
+        min_minutes = min(NEXT_RUN_MINUTES)
+        update_cf_cron(min_minutes // 60, min_minutes % 60)
+
+    sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":
     main()
