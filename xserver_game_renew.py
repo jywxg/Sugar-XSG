@@ -178,7 +178,7 @@ def update_cf_cron(remaining_hours: int, remaining_minutes: int) -> tuple:
         log("\n⚠️ 账号状态异常或未取得剩余时间，Cron 兜底设为每 2 小时运行: 0 */2 * * *")
     else:
         total_remaining_minutes = remaining_hours * 60 + remaining_minutes
-        wait_minutes = max(10, total_remaining_minutes - 210)
+        wait_minutes = max(10, total_remaining_minutes - 230)
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         next_run_utc = now_utc + datetime.timedelta(minutes=wait_minutes)
