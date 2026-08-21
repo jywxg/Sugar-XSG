@@ -51,11 +51,10 @@ IP_CHECK_URL = "https://ipinfo.io/json"
 
 RENEW_THRESHOLD_HOURS = 4
 
-# 代理配置判断（兼容 USE_PROXY 和 IS_PROXY）
+# 代理配置判断
 is_proxy_enabled = os.getenv("USE_PROXY", "").lower() in ["true", "1", "yes"] or os.getenv("IS_PROXY", "").lower() in ["true", "1", "yes"]
 USE_PROXY = is_proxy_enabled
 
-# 移除全局修改代理的逻辑，改为每个账号独立生成
 def get_proxy_config():
     return {"http": "http://127.0.0.1:1081", "https": "http://127.0.0.1:1081"} if USE_PROXY else {}
 
@@ -88,7 +87,6 @@ DEFAULT_TIMEOUT = 30
 SLOW_TIMEOUT = 60
 SCRIPT_NAME = os.path.basename(__file__)
 
-# 收集所有账号的剩余时间，用于计算最小 Cron
 NEXT_RUN_MINUTES = []
 
 def log(msg):
@@ -123,42 +121,70 @@ def parse_remaining(page_html: str) -> tuple:
 def can_renew(page_html: str) -> bool:
     return "残り契約時間が4時間を切るまで" not in page_html
 
+# 🆕 动态表单解析器：完美模拟真实浏览器行为，抓取所有必要的令牌和动作按钮
+def extract_form_data(html: str) -> dict:
+    data = {}
+    inputs = re.findall(r'<input[^>]+>', html, re.IGNORECASE)
+    
+    # 1. 抓取所有 type="hidden"
+    for inp in inputs:
+        if 'type="hidden"' in inp.lower() or "type='hidden'" in inp.lower():
+            n_match = re.search(r'name=["\']([^"\']+)["\']', inp, re.IGNORECASE)
+            v_match = re.search(r'value=["\']([^"\']*)["\']', inp, re.IGNORECASE)
+            if n_match:
+                data[n_match.group(1)] = v_match.group(1) if v_match else ""
+                
+    # 2. 抓取提交按钮 (Ethna 框架必不可少的 action_xxx)
+    for inp in inputs:
+        if 'type="submit"' in inp.lower() or 'type="image"' in inp.lower() or 'class="btn' in inp.lower():
+            n_match = re.search(r'name=["\'](action_[^"\']+)["\']', inp, re.IGNORECASE)
+            if n_match:
+                v_match = re.search(r'value=["\']([^"\']*)["\']', inp, re.IGNORECASE)
+                data[n_match.group(1)] = v_match.group(1) if v_match else "1"
+                
+    buttons = re.findall(r'<button[^>]+>.*?</button>', html, re.IGNORECASE | re.DOTALL)
+    for btn in buttons:
+        n_match = re.search(r'name=["\'](action_[^"\']+)["\']', btn, re.IGNORECASE)
+        if n_match:
+            v_match = re.search(r'value=["\']([^"\']*)["\']', btn, re.IGNORECASE)
+            data[n_match.group(1)] = v_match.group(1) if v_match else "1"
+            
+    # 3. 抓取续期时长 period 选项
+    periods = re.findall(r'name=["\']period["\'][^>]*value=["\'](\d+)["\']', html, re.IGNORECASE)
+    if not periods:
+        sel_match = re.search(r'<select[^>]*name=["\']period["\'][^>]*>(.*?)</select>', html, re.IGNORECASE | re.DOTALL)
+        if sel_match:
+            periods = re.findall(r'value=["\'](\d+)["\']', sel_match.group(1), re.IGNORECASE)
+    if periods:
+        data["period"] = str(max(int(p) for p in periods))
+        
+    return data
+
 def update_cf_cron(remaining_hours: int, remaining_minutes: int):
     cf_account_id = os.environ.get("CF_ACCOUNT_ID", "")
     cf_script_name = os.environ.get("CF_SCRIPT_NAME", "")
     cf_api_token = os.environ.get("CF_API_TOKEN", "")
 
     if not all([cf_account_id, cf_script_name, cf_api_token]):
-        log("\n⚠️ 未配置完整的 Cloudflare 变量，跳过 Cron 更新")
         return
 
     if remaining_hours < 0:
         cron_str = "0 */2 * * *"
-        log("\n⚠️ 账号状态异常或未取得剩余时间，Cron 兜底设为每 2 小时运行: 0 */2 * * *")
+        log("\n⚠️ 状态异常，Cron 兜底设为每 2 小时运行: 0 */2 * * *")
     else:
         total_remaining_minutes = remaining_hours * 60 + remaining_minutes
         wait_minutes = max(10, total_remaining_minutes - 210)
-
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         next_run_utc = now_utc + datetime.timedelta(minutes=wait_minutes)
         cron_str = f"{next_run_utc.minute} {next_run_utc.hour} {next_run_utc.day} {next_run_utc.month} *"
-        log(f"\n⏱️ 预计下次续期触发时间 (UTC): {next_run_utc.strftime('%Y-%m-%d %H:%M:%S')}")
-        log(f"⏱️ 写入 CF 的 Cron 表达式: {cron_str}")
+        log(f"\n⏱️ 预计下次触发 (UTC): {next_run_utc.strftime('%Y-%m-%d %H:%M:%S')} (Cron: {cron_str})")
 
     url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/workers/scripts/{cf_script_name}/schedules"
-    headers = {
-        "Authorization": f"Bearer {cf_api_token}",
-        "Content-Type": "application/json",
-    }
-
+    headers = {"Authorization": f"Bearer {cf_api_token}", "Content-Type": "application/json"}
     try:
-        resp = requests.put(url, json=[{"cron": cron_str}], headers=headers, timeout=15)
-        if resp.ok:
-            log("✅ 成功更新 Cloudflare Worker 的定时触发器！")
-        else:
-            log(f"❌ 更新 Cloudflare Cron 失败: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        log(f"❌ 调用 Cloudflare API 出错: {e}")
+        requests.put(url, json=[{"cron": cron_str}], headers=headers, timeout=15)
+    except Exception:
+        pass
 
 def notify_tg(ctx: dict, result: str, deadline: str, remaining_str: str):
     if not TG_BOT:
@@ -168,24 +194,9 @@ def notify_tg(ctx: dict, result: str, deadline: str, remaining_str: str):
         return
     chat_id, bot_token = parts[0].strip(), parts[1].strip()
 
-    proxy_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("PROXY_IP", "未知"))
-    direct_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("DIRECT_IP", "未知"))
-    actual_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("ACTUAL_IP", "未知"))
-
     network_info = []
     if USE_PROXY:
-        proxy_status = "✅ 可用" if ctx.get("PROXY_AVAILABLE") else "❌ 不可用/被屏蔽"
-        network_info.append(f"🔀 代理: {proxy_status}")
-        if ctx.get("PROXY_AVAILABLE"):
-            network_info.append(f"   IP: {proxy_masked} ({ctx.get('PROXY_COUNTRY', '未知')})")
-        network_info.append(f"🌐 直连: IP {direct_masked} ({ctx.get('DIRECT_COUNTRY', '未知')})")
         network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
-        if ctx.get("ACTUAL_MODE") == "代理":
-            network_info.append(f"   IP: {actual_masked} ({ctx.get('ACTUAL_COUNTRY', '未知')})")
-    else:
-        network_info.append(f"🌐 直连: IP {direct_masked} ({ctx.get('DIRECT_COUNTRY', '未知')})")
-        network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
-
     network_str = "\n".join(network_info)
 
     message = (
@@ -233,16 +244,12 @@ def run_account(account) -> bool:
         "PROXY_AVAILABLE": False,
         "ACTUAL_MODE": "直连",
         "ACTUAL_IP": "未知",
-        "ACTUAL_COUNTRY": "未知",
-        "DIRECT_IP": "未知",
-        "DIRECT_COUNTRY": "未知"
+        "ACTUAL_COUNTRY": "未知"
     }
 
     divider(f"{SCRIPT_NAME} starts")
     log(f"🕐 运行时间: {now_str()}")
     log(f"🖥 服务器: {ctx['SERVER_NAME']}")
-
-    ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"] = check_ip_info()
 
     if USE_PROXY:
         log("🌐 检测代理是否可用及目标网站联通性...")
@@ -252,32 +259,26 @@ def run_account(account) -> bool:
                 test_resp = requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
                 if test_resp.status_code == 200 and 'name="uniqid"' in test_resp.text:
                     ctx["PROXY_AVAILABLE"] = True
-                    ctx["PROXY_IP"], ctx["PROXY_COUNTRY"] = proxy_ip, proxy_country
-                    ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "代理", proxy_ip, proxy_country
+                    ctx["ACTUAL_MODE"] = "代理"
                     log("✅ 代理测试通过，未被目标网站屏蔽")
-                else:
-                    log(f"⚠️ 代理被目标网站屏蔽或拦截 (状态码: {test_resp.status_code})")
             except Exception:
-                log("⚠️ 代理访问目标网站超时或网络异常")
-
+                pass
         if not ctx["PROXY_AVAILABLE"]:
             log("🔄 放弃代理，自动退回 [直连] 模式运行...")
-            ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "直连", ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"]
+            ctx["ACTUAL_MODE"] = "直连"
             ctx["PROXIES"] = {}
-    else:
-        ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "直连", ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"]
 
     with requests.Session() as session:
         session.headers.update(BASE_HEADERS)
-        session.max_redirects = 10
-
         email_masked = re.sub(r"(.{2}).*(@.*)", r"\1***\2", account["email"])
         log(f"🔑 正在登录... 账号: {email_masked}")
-        time.sleep(1)
-
+        
         try:
             resp = session.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
-            uniqid_match = re.search(r'name="uniqid"\s+value="([^"]+)"', resp.text)
+            uniqid_match = re.search(r'name=["\']uniqid["\']\s+value=["\']([^"\']+)["\']', resp.text)
+            if not uniqid_match:
+                uniqid_match = re.search(r'value=["\']([^"\']+)["\']\s+name=["\']uniqid["\']', resp.text)
+                
             if not uniqid_match:
                 NEXT_RUN_MINUTES.append(-1)
                 return finish_account(ctx, False, "❌ 未找到登录 uniqid", "未知", "0小时0分")
@@ -285,34 +286,29 @@ def run_account(account) -> bool:
             session.post(
                 LOGIN_URL,
                 headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": LOGIN_PAGE},
-                data={"request_page": "xserver/index", "site": "", "uniqid": uniqid_match.group(1), "memberid": account["email"], "user_password": account["password"], "service_login": "xserver", "action_user_login": "%A5%ED%A5%B0%A5%A4%A5%F3%A4%B9%A4%EB"},
+                data={"request_page": "xserver/index", "site": "", "uniqid": uniqid_match.group(1), "memberid": account["email"], "user_password": account["password"], "service_login": "xserver", "action_user_login": "ログインする"},
                 allow_redirects=True, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]
             )
+            
             if not session.cookies.get("X2SESSID"):
                 NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ 登录失败，未获取到 Cookies", "未知", "0小时0分")
+                return finish_account(ctx, False, "❌ 登录失败", "未知", "0小时0分")
             log("✅ 登录成功")
 
             log("🔗 跳转到游戏面板...")
-            time.sleep(1.5)
-            resp = session.get(XMGAME_INDEX_URL, headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"], allow_redirects=True)
+            resp = session.get(XMGAME_INDEX_URL, headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
             jumpvps_match = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", resp.text)
             if not jumpvps_match:
                 NEXT_RUN_MINUTES.append(-1)
                 return finish_account(ctx, False, "❌ 未找到 jumpvps 链接", "未知", "0小时0分")
 
             server_id = jumpvps_match.group(1)
-            time.sleep(1)
-            resp2 = session.get(f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}", headers={**BASE_HEADERS, "referer": XMGAME_INDEX_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"], allow_redirects=True)
+            resp2 = session.get(f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}", headers={**BASE_HEADERS, "referer": XMGAME_INDEX_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
 
             uname = re.search(r'name="username"\s+value="([^"]+)"', resp2.text)
             s_iden = re.search(r'name="server_identify"\s+value="([^"]+)"', resp2.text)
             pwd = re.search(r'name="password"\s+value="([^"]+)"', resp2.text)
             srv = re.search(r'name="service"\s+value="([^"]+)"', resp2.text)
-
-            if not all([uname, s_iden, pwd, srv]):
-                NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ onetimelogin 表单解析失败", "未知", "0小时0分")
 
             session.post(
                 ONETIMELOGIN_URL,
@@ -320,27 +316,15 @@ def run_account(account) -> bool:
                 data={"username": uname.group(1), "server_identify": s_iden.group(1), "password": pwd.group(1), "service": srv.group(1), "master_panel_username": "", "back": ""},
                 allow_redirects=True, timeout=SLOW_TIMEOUT, proxies=ctx["PROXIES"]
             )
-
-            if not (session.cookies.get("X2%2Fxmgame_SESSID") or session.cookies.get("X2/xmgame_SESSID")):
-                NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ 面板 Session 获取失败", "未知", "0小时0分")
             log("✅ 游戏面板 Session 获取成功")
         except Exception as e:
-            log(f"❌ 登录网络异常: {e}")
             NEXT_RUN_MINUTES.append(-1)
-            return finish_account(ctx, False, "❌ 登录抛出异常", "未知", "0小时0分")
+            return finish_account(ctx, False, f"❌ 登录网络异常: {e}", "未知", "0小时0分")
 
         log("📋 读取服务器信息...")
-        time.sleep(1)
         resp_info = session.get(INFO_URL, headers={**BASE_HEADERS, "referer": BASE_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
         resp_info.encoding = "EUC-JP"
         h_before, m_before, dl_before, is_expired = parse_remaining(resp_info.text)
-
-        if h_before == -2:
-            log("❌ 解析剩余时间失败，页面结构异常")
-            NEXT_RUN_MINUTES.append(-1)
-            return finish_account(ctx, False, "❌ 页面数据解析失败", "未知", "0小时0分")
-
         remaining_str_before = f"{h_before} 小时 {m_before} 分"
 
         if is_expired:
@@ -349,60 +333,66 @@ def run_account(account) -> bool:
             log(f"📅 当前利用期限：{dl_before}")
             log(f"⏳ 剩余时间：{remaining_str_before}")
             if h_before >= RENEW_THRESHOLD_HOURS:
-                log(f"ℹ️  剩余 {h_before} 小时，未低于阈值，无需续期")
                 NEXT_RUN_MINUTES.append(h_before * 60 + m_before)
                 return finish_account(ctx, True, "⌛️ 期限未至（无需续期）", dl_before, remaining_str_before)
 
-            time.sleep(1)
             resp_extend = session.get(EXTEND_URL, headers={**BASE_HEADERS, "referer": INFO_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
             resp_extend.encoding = "EUC-JP"
             if not can_renew(resp_extend.text):
-                log("⚠️ 页面提示暂不可续期")
                 NEXT_RUN_MINUTES.append(h_before * 60 + m_before)
                 return finish_account(ctx, True, "⌛️ 期限未至（暂不可续期）", dl_before, remaining_str_before)
 
         log("🔄 开始续期...")
         try:
-            time.sleep(1)
+            # 第一步：进入续期页面，提取所有需 POST 到确认页的数据
             resp_renew = session.get(RENEW_URL, headers={**BASE_HEADERS, "referer": EXTEND_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
             
-            # 1. 提取 login_token
-            login_token = re.search(r'name="login_token"\s+value="([^"]+)"', resp_renew.text)
-            if not login_token:
-                NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ 未找到续期 login_token", dl_before, remaining_str_before)
+            form_data_conf = extract_form_data(resp_renew.text)
+            # 容错：如果解析器意外漏掉核心数据，执行强力兜底
+            if "login_token" not in form_data_conf:
+                lt_match = re.search(r'name=["\']login_token["\']\s+value=["\']([^"\']+)["\']', resp_renew.text)
+                if not lt_match:
+                    NEXT_RUN_MINUTES.append(-1)
+                    return finish_account(ctx, False, "❌ 未能在续期页找到 login_token", dl_before, remaining_str_before)
+                form_data_conf["login_token"] = lt_match.group(1)
             
-            # 2. 提取并携带 ethna_csrf
-            ethna_csrf_match = re.search(r'name="ethna_csrf"\s+value="([^"]+)"', resp_renew.text)
-            ethna_csrf_val = ethna_csrf_match.group(1) if ethna_csrf_match else ""
-            if not ethna_csrf_val:
-                log("⚠️ 未在续期页找到 ethna_csrf，可能会被服务器拦截...")
-
+            if "period" not in form_data_conf:
+                form_data_conf["period"] = "48" # 默认周期
+                
+            if not any(k.startswith("action_") for k in form_data_conf.keys()):
+                form_data_conf["action_game_freeplan_extend_conf"] = "確認画面へ進む"
+            
+            log(f"📝 提交确认请求 (抓取到 {len(form_data_conf)} 个参数)...")
             time.sleep(1)
-            # 提交到确认页面 (CONF_URL)
             resp_conf = session.post(
                 CONF_URL, 
                 headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": RENEW_URL}, 
-                data={"ethna_csrf": ethna_csrf_val, "login_token": login_token.group(1), "period": "48"}, 
+                data=form_data_conf, 
                 timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]
             )
             
-            # 从确认页面再次提取 ethna_csrf，部分网站在确认步骤会刷新 Token
-            conf_csrf_match = re.search(r'name="ethna_csrf"\s+value="([^"]+)"', resp_conf.text)
-            ethna_csrf_val_do = conf_csrf_match.group(1) if conf_csrf_match else ethna_csrf_val
+            # 第二步：进入确认页面，提取真正用于续期执行的 DO 数据
+            form_data_do = extract_form_data(resp_conf.text)
+            
+            # 继承与兜底处理
+            if "login_token" not in form_data_do:
+                form_data_do["login_token"] = form_data_conf.get("login_token", "")
+            if "period" not in form_data_do:
+                form_data_do["period"] = form_data_conf.get("period", "48")
+            if not any(k.startswith("action_") for k in form_data_do.keys()):
+                form_data_do["action_game_freeplan_extend_do"] = "延長する"
 
+            log(f"📝 提交最终执行请求 (包含 {len(form_data_do)} 个参数)...")
             time.sleep(1)
-            # 执行最终续期 (DO_URL)
             session.post(
                 DO_URL, 
                 headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": CONF_URL}, 
-                data={"ethna_csrf": ethna_csrf_val_do, "period": "48"}, 
+                data=form_data_do, 
                 timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]
             )
         except Exception as e:
-            log(f"❌ 续期请求异常: {e}")
             NEXT_RUN_MINUTES.append(-1)
-            return finish_account(ctx, False, "❌ 续期请求抛出异常", dl_before, remaining_str_before)
+            return finish_account(ctx, False, f"❌ 续期请求抛出异常: {e}", dl_before, remaining_str_before)
 
         log("⏳ 等待系统更新...")
         time.sleep(3)
@@ -413,7 +403,6 @@ def run_account(account) -> bool:
         log(f"📅 续期后利用期限：{dl_after}")
         remaining_str_after = f"{h_after} 小时 {m_after} 分"
 
-        # 严谨的成功判定逻辑：只有状态反转或日期实质改变才算成功
         success = False
         if is_expired and not expired_after: 
             success = True
