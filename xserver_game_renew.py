@@ -159,17 +159,22 @@ def extract_form_data(html: str) -> dict:
         
     return data
 
-def update_cf_cron(remaining_hours: int, remaining_minutes: int):
+def update_cf_cron(remaining_hours: int, remaining_minutes: int) -> tuple:
+    """计算并在 CF 中更新下一次执行的 CRON，返回状态元组"""
     cf_account_id = os.environ.get("CF_ACCOUNT_ID", "")
     cf_script_name = os.environ.get("CF_SCRIPT_NAME", "")
     cf_api_token = os.environ.get("CF_API_TOKEN", "")
+    
+    cron_str = "未知"
+    cst_next_run_str = "未知"
 
     if not all([cf_account_id, cf_script_name, cf_api_token]):
         log("\n⚠️ 未配置完整的 Cloudflare 变量，跳过 Cron 更新")
-        return
+        return False, "⚠️ 未配置 CF 环境变量", cron_str, cst_next_run_str
 
     if remaining_hours < 0:
         cron_str = "0 */2 * * *"
+        cst_next_run_str = "兜底每2小时"
         log("\n⚠️ 账号状态异常或未取得剩余时间，Cron 兜底设为每 2 小时运行: 0 */2 * * *")
     else:
         total_remaining_minutes = remaining_hours * 60 + remaining_minutes
@@ -180,7 +185,8 @@ def update_cf_cron(remaining_hours: int, remaining_minutes: int):
         cron_str = f"{next_run_utc.minute} {next_run_utc.hour} {next_run_utc.day} {next_run_utc.month} *"
         
         cst_next_run = next_run_utc.astimezone(datetime.timezone(datetime.timedelta(hours=8)))
-        log(f"\n⏱️ 预计下次触发 [UTC+8]: {cst_next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+        cst_next_run_str = cst_next_run.strftime('%Y-%m-%d %H:%M:%S')
+        log(f"\n⏱️ 预计下次触发 [UTC+8]: {cst_next_run_str}")
         log(f"⏱️ 写入 CF Worker 的 Cron 表达式 (UTC): {cron_str}")
 
     url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/workers/scripts/{cf_script_name}/schedules"
@@ -193,12 +199,15 @@ def update_cf_cron(remaining_hours: int, remaining_minutes: int):
         resp = requests.put(url, json=[{"cron": cron_str}], headers=headers, timeout=15)
         if resp.ok:
             log("✅ 成功更新 Cloudflare Worker 的定时触发器 (Cron)！")
+            return True, "✅ 更新成功", cron_str, cst_next_run_str
         else:
             log(f"❌ 更新 Cloudflare Cron 失败: HTTP {resp.status_code} - {resp.text}")
+            return False, f"❌ 更新失败 (HTTP {resp.status_code})", cron_str, cst_next_run_str
     except Exception as e:
         log(f"❌ 调用 Cloudflare API 异常: {e}")
+        return False, "❌ 调用 API 异常", cron_str, cst_next_run_str
 
-def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: str):
+def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: str, cf_info: dict = None):
     if not TG_BOT:
         return
     parts = TG_BOT.split(",", 1)
@@ -225,9 +234,20 @@ def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: s
         network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
 
     network_str = "\n".join(network_info)
-    
-    # 采用方案二：加上 ⏱️ Emoji，确保与 📅 之后的文字完全对齐
     cst_str = f"\n⏱️ 对应CST时间: {cst_dl}" if cst_dl and cst_dl != "未知" else ""
+
+    # 新增构建 CF 信息文本块
+    cf_str = ""
+    if cf_info:
+        cf_status = cf_info.get("status", "未知")
+        cf_cron = cf_info.get("cron", "未知")
+        cf_cst = cf_info.get("cst", "未知")
+        cf_str = (
+            f"☁️ CF 定时器: {cf_status}\n"
+            f"⏱️ 下次触发(CST): {cf_cst}\n"
+            f"⚙️ CRON (UTC): {cf_cron}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+        )
 
     message = (
         f"🎮 XServer Game 续期通知\n"
@@ -238,6 +258,7 @@ def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: s
         f"📊 续期结果: {result}\n"
         f"🕐 执行时间: {now_str()}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
+        f"{cf_str}"
         f"{network_str}"
     )
     
@@ -252,12 +273,20 @@ def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: s
     except Exception as e:
         log(f"⚠️ TG 推送失败: {e}")
 
-def finish_account(ctx: dict, success: bool, result: str, raw_dl: str, cst_dl: str, remaining_str: str) -> bool:
-    notify_tg(ctx, result, raw_dl, cst_dl, remaining_str)
+def finish_account(ctx: dict, success: bool, result: str, raw_dl: str, cst_dl: str, remaining_str: str) -> tuple:
+    """运行结束，仅打包结果，延迟给外部调用推送"""
     tag = "passed" if success else "failed"
     elapsed_time = f"{time.time() - ctx['START_TIME']:.2f}s"
     divider(f"{SCRIPT_NAME} {tag} in {elapsed_time}")
-    return success
+    
+    tg_args = {
+        "ctx": ctx,
+        "result": result,
+        "raw_dl": raw_dl,
+        "cst_dl": cst_dl,
+        "remaining_str": remaining_str
+    }
+    return success, tg_args
 
 def check_ip_info(proxies=None):
     try:
@@ -267,7 +296,7 @@ def check_ip_info(proxies=None):
     except Exception:
         return "未知", "未知"
 
-def run_account(account) -> bool:
+def run_account(account) -> tuple:
     ctx = {
         "SERVER_NAME": account["name"],
         "START_TIME": time.time(),
@@ -462,10 +491,14 @@ def run_account(account) -> bool:
 
 def main():
     failed = 0
+    tg_tasks = []
+    
+    # 1. 遍历所有账号运行并收集 TG 推送材料
     for account in ACCOUNTS:
         start_len = len(NEXT_RUN_MINUTES)
         try:
-            ok = run_account(account)
+            ok, tg_args = run_account(account)
+            tg_tasks.append(tg_args)
             if not ok: failed += 1
         except Exception as e:
             failed += 1
@@ -474,11 +507,29 @@ def main():
         if len(NEXT_RUN_MINUTES) == start_len:
             NEXT_RUN_MINUTES.append(-1)
 
+    # 2. 集中处理 CF Cron 定时器更新
     if not NEXT_RUN_MINUTES or -1 in NEXT_RUN_MINUTES:
-        update_cf_cron(-1, -1)
+        _, cf_msg, cf_cron, cf_cst = update_cf_cron(-1, -1)
     else:
         min_minutes = min(NEXT_RUN_MINUTES)
-        update_cf_cron(min_minutes // 60, min_minutes % 60)
+        _, cf_msg, cf_cron, cf_cst = update_cf_cron(min_minutes // 60, min_minutes % 60)
+
+    cf_info = {
+        "status": cf_msg,
+        "cron": cf_cron,
+        "cst": cf_cst
+    }
+
+    # 3. 将包含 CF 结果的信息统一发送给 TG
+    for args in tg_tasks:
+        notify_tg(
+            ctx=args["ctx"],
+            result=args["result"],
+            raw_dl=args["raw_dl"],
+            cst_dl=args["cst_dl"],
+            remaining_str=args["remaining_str"],
+            cf_info=cf_info
+        )
 
     sys.exit(1 if failed else 0)
 
