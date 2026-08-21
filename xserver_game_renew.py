@@ -204,7 +204,7 @@ def notify_tg(ctx: dict, result: str, deadline: str, remaining_str: str):
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
             json={"chat_id": chat_id, "text": message},
             timeout=10,
-            proxies=ctx.get("PROXIES", {}) # 使用隔离的代理配置发通知
+            proxies=ctx.get("PROXIES", {})
         )
         log("📨 TG 推送成功")
     except Exception as e:
@@ -226,7 +226,6 @@ def check_ip_info(proxies=None):
         return "未知", "未知"
 
 def run_account(account) -> bool:
-    # 隔离上下文变量，防止跨账号污染
     ctx = {
         "SERVER_NAME": account["name"],
         "START_TIME": time.time(),
@@ -250,10 +249,7 @@ def run_account(account) -> bool:
         proxy_ip, proxy_country = check_ip_info(ctx["PROXIES"])
         if proxy_ip != "未知":
             try:
-                # 针对目标网站进行真实探测
                 test_resp = requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
-                
-                # 严密判断：不仅要求状态码 200，且页面必须包含登录必需的 uniqid 字段（证明没被 WAF 拦截页替代）
                 if test_resp.status_code == 200 and 'name="uniqid"' in test_resp.text:
                     ctx["PROXY_AVAILABLE"] = True
                     ctx["PROXY_IP"], ctx["PROXY_COUNTRY"] = proxy_ip, proxy_country
@@ -261,10 +257,9 @@ def run_account(account) -> bool:
                     log("✅ 代理测试通过，未被目标网站屏蔽")
                 else:
                     log(f"⚠️ 代理被目标网站屏蔽或拦截 (状态码: {test_resp.status_code})")
-            except Exception as e:
+            except Exception:
                 log("⚠️ 代理访问目标网站超时或网络异常")
 
-        # 若检测代理不可用或被屏蔽，执行退回直连逻辑
         if not ctx["PROXY_AVAILABLE"]:
             log("🔄 放弃代理，自动退回 [直连] 模式运行...")
             ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "直连", ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"]
@@ -272,7 +267,6 @@ def run_account(account) -> bool:
     else:
         ctx["ACTUAL_MODE"], ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = "直连", ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"]
 
-    # --- 登录与跳转逻辑，优化: 封装到带 session 管理的作用域中 ---
     with requests.Session() as session:
         session.headers.update(BASE_HEADERS)
         session.max_redirects = 10
@@ -299,7 +293,6 @@ def run_account(account) -> bool:
                 return finish_account(ctx, False, "❌ 登录失败，未获取到 Cookies", "未知", "0小时0分")
             log("✅ 登录成功")
 
-            # 跳转面板
             log("🔗 跳转到游戏面板...")
             time.sleep(1.5)
             resp = session.get(XMGAME_INDEX_URL, headers={**BASE_HEADERS, "referer": f"{BASE_URL}/xapanel/"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"], allow_redirects=True)
@@ -337,7 +330,6 @@ def run_account(account) -> bool:
             NEXT_RUN_MINUTES.append(-1)
             return finish_account(ctx, False, "❌ 登录抛出异常", "未知", "0小时0分")
 
-        # ----------------- 数据处理与续期 -----------------
         log("📋 读取服务器信息...")
         time.sleep(1)
         resp_info = session.get(INFO_URL, headers={**BASE_HEADERS, "referer": BASE_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
@@ -373,15 +365,40 @@ def run_account(account) -> bool:
         try:
             time.sleep(1)
             resp_renew = session.get(RENEW_URL, headers={**BASE_HEADERS, "referer": EXTEND_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+            
+            # 1. 提取 login_token
             login_token = re.search(r'name="login_token"\s+value="([^"]+)"', resp_renew.text)
             if not login_token:
                 NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ 未找到续期 Token", dl_before, remaining_str_before)
+                return finish_account(ctx, False, "❌ 未找到续期 login_token", dl_before, remaining_str_before)
+            
+            # 2. 提取并携带 ethna_csrf
+            ethna_csrf_match = re.search(r'name="ethna_csrf"\s+value="([^"]+)"', resp_renew.text)
+            ethna_csrf_val = ethna_csrf_match.group(1) if ethna_csrf_match else ""
+            if not ethna_csrf_val:
+                log("⚠️ 未在续期页找到 ethna_csrf，可能会被服务器拦截...")
 
             time.sleep(1)
-            session.post(CONF_URL, headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": RENEW_URL}, data={"ethna_csrf": "", "login_token": login_token.group(1), "period": "48"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+            # 提交到确认页面 (CONF_URL)
+            resp_conf = session.post(
+                CONF_URL, 
+                headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": RENEW_URL}, 
+                data={"ethna_csrf": ethna_csrf_val, "login_token": login_token.group(1), "period": "48"}, 
+                timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]
+            )
+            
+            # 从确认页面再次提取 ethna_csrf，部分网站在确认步骤会刷新 Token
+            conf_csrf_match = re.search(r'name="ethna_csrf"\s+value="([^"]+)"', resp_conf.text)
+            ethna_csrf_val_do = conf_csrf_match.group(1) if conf_csrf_match else ethna_csrf_val
+
             time.sleep(1)
-            session.post(DO_URL, headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": CONF_URL}, data={"ethna_csrf": "", "period": "48"}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
+            # 执行最终续期 (DO_URL)
+            session.post(
+                DO_URL, 
+                headers={**BASE_HEADERS, "content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": CONF_URL}, 
+                data={"ethna_csrf": ethna_csrf_val_do, "period": "48"}, 
+                timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"]
+            )
         except Exception as e:
             log(f"❌ 续期请求异常: {e}")
             NEXT_RUN_MINUTES.append(-1)
@@ -396,10 +413,12 @@ def run_account(account) -> bool:
         log(f"📅 续期后利用期限：{dl_after}")
         remaining_str_after = f"{h_after} 小时 {m_after} 分"
 
+        # 严谨的成功判定逻辑：只有状态反转或日期实质改变才算成功
         success = False
-        if is_expired and not expired_after: success = True
-        elif dl_after != dl_before: success = True
-        elif not expired_after: success = True
+        if is_expired and not expired_after: 
+            success = True
+        elif dl_after != dl_before: 
+            success = True
 
         if success:
             log("✅ 续期成功！")
