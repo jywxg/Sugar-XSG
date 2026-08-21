@@ -225,7 +225,9 @@ def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: s
         network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
 
     network_str = "\n".join(network_info)
-    cst_str = f"\n     对应CST时间: {cst_dl}" if cst_dl and cst_dl != "未知" else ""
+    
+    # 采用方案二：加上 ⏱️ Emoji，确保与 📅 之后的文字完全对齐
+    cst_str = f"\n⏱️ 对应CST时间: {cst_dl}" if cst_dl and cst_dl != "未知" else ""
 
     message = (
         f"🎮 XServer Game 续期通知\n"
@@ -348,6 +350,10 @@ def run_account(account) -> bool:
             s_iden = re.search(r'name="server_identify"\s+value="([^"]+)"', resp2.text)
             pwd = re.search(r'name="password"\s+value="([^"]+)"', resp2.text)
             srv = re.search(r'name="service"\s+value="([^"]+)"', resp2.text)
+
+            if not all([uname, s_iden, pwd, srv]):
+                NEXT_RUN_MINUTES.append(-1)
+                return finish_account(ctx, False, "❌ 解析一次性登录表单参数失败", "未知", "未知", "0小时0分")
 
             session.post(
                 ONETIMELOGIN_URL,
