@@ -100,12 +100,12 @@ def get_cst_time():
 def now_str():
     return get_cst_time().strftime("%Y-%m-%d %H:%M:%S")
 
-def format_exact_deadline(h: int, m: int, raw_dl: str) -> str:
-    """结合剩余小时/分钟，计算精确的具体到期时间点 (转换为 UTC+8 呈现)"""
+def get_exact_cst_time(h: int, m: int) -> str:
+    """计算精确的具体到期CST(UTC+8)时间点"""
     if h < 0:
-        return raw_dl
+        return "未知"
     exact_dt = get_cst_time() + datetime.timedelta(hours=h, minutes=m)
-    return f"{raw_dl} (准确到期 [UTC+8]: {exact_dt.strftime('%Y-%m-%d %H:%M:%S')})"
+    return exact_dt.strftime('%Y-%m-%d %H:%M:%S')
 
 def parse_remaining(page_html: str) -> tuple:
     deadline = re.search(r'<span class="dateLimit">\(([^)]+)\)</span>', page_html)
@@ -165,7 +165,7 @@ def update_cf_cron(remaining_hours: int, remaining_minutes: int):
     cf_api_token = os.environ.get("CF_API_TOKEN", "")
 
     if not all([cf_account_id, cf_script_name, cf_api_token]):
-        log("\n⚠️ 未配置完整的 Cloudflare 变量 (CF_ACCOUNT_ID/CF_SCRIPT_NAME/CF_API_TOKEN)，跳过 Cron 更新")
+        log("\n⚠️ 未配置完整的 Cloudflare 变量，跳过 Cron 更新")
         return
 
     if remaining_hours < 0:
@@ -198,7 +198,7 @@ def update_cf_cron(remaining_hours: int, remaining_minutes: int):
     except Exception as e:
         log(f"❌ 调用 Cloudflare API 异常: {e}")
 
-def notify_tg(ctx: dict, result: str, deadline: str, remaining_str: str):
+def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: str):
     if not TG_BOT:
         return
     parts = TG_BOT.split(",", 1)
@@ -206,38 +206,39 @@ def notify_tg(ctx: dict, result: str, deadline: str, remaining_str: str):
         return
     chat_id, bot_token = parts[0].strip(), parts[1].strip()
 
-    # 恢复 IP 地址及网络信息的获取与格式化
-    proxy_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("PROXY_IP", "未知"))
-    direct_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("DIRECT_IP", "未知"))
-    actual_masked = re.sub(r"\.\d+(?=$)", ".**", ctx.get("ACTUAL_IP", "未知"))
+    proxy_ip = ctx.get("PROXY_IP", "未知")
+    direct_ip = ctx.get("DIRECT_IP", "未知")
+    actual_ip = ctx.get("ACTUAL_IP", "未知")
 
     network_info = []
     if USE_PROXY:
         proxy_status = "✅ 可用" if ctx.get("PROXY_AVAILABLE") else "❌ 不可用/被屏蔽"
         network_info.append(f"🔀 代理: {proxy_status}")
         if ctx.get("PROXY_AVAILABLE"):
-            network_info.append(f"   IP: {proxy_masked} ({ctx.get('PROXY_COUNTRY', '未知')})")
-        network_info.append(f"🌐 直连: IP {direct_masked} ({ctx.get('DIRECT_COUNTRY', '未知')})")
+            network_info.append(f"   IP: {proxy_ip} ({ctx.get('PROXY_COUNTRY', '未知')})")
+        network_info.append(f"🌐 直连: IP {direct_ip} ({ctx.get('DIRECT_COUNTRY', '未知')})")
         network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
         if ctx.get("ACTUAL_MODE") == "代理":
-            network_info.append(f"   IP: {actual_masked} ({ctx.get('ACTUAL_COUNTRY', '未知')})")
+            network_info.append(f"   IP: {actual_ip} ({ctx.get('ACTUAL_COUNTRY', '未知')})")
     else:
-        network_info.append(f"🌐 直连: IP {direct_masked} ({ctx.get('DIRECT_COUNTRY', '未知')})")
+        network_info.append(f"🌐 直连: IP {direct_ip} ({ctx.get('DIRECT_COUNTRY', '未知')})")
         network_info.append(f"✅ 实际使用: {ctx.get('ACTUAL_MODE', '直连')}")
 
     network_str = "\n".join(network_info)
+    cst_str = f"\n     对应CST时间: {cst_dl}" if cst_dl and cst_dl != "未知" else ""
 
     message = (
         f"🎮 XServer Game 续期通知\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🖥 服务器名称: {ctx.get('SERVER_NAME')}\n"
-        f"📅 到期时间(有效期): {deadline}\n"
+        f"📅 到期时间(有效期): {raw_dl}{cst_str}\n"
         f"⏳ 剩余有效时长: {remaining_str}\n"
         f"📊 续期结果: {result}\n"
         f"🕐 执行时间: {now_str()}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"{network_str}"
     )
+    
     try:
         requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -249,8 +250,8 @@ def notify_tg(ctx: dict, result: str, deadline: str, remaining_str: str):
     except Exception as e:
         log(f"⚠️ TG 推送失败: {e}")
 
-def finish_account(ctx: dict, success: bool, result: str, deadline: str, remaining_str: str) -> bool:
-    notify_tg(ctx, result, deadline, remaining_str)
+def finish_account(ctx: dict, success: bool, result: str, raw_dl: str, cst_dl: str, remaining_str: str) -> bool:
+    notify_tg(ctx, result, raw_dl, cst_dl, remaining_str)
     tag = "passed" if success else "failed"
     elapsed_time = f"{time.time() - ctx['START_TIME']:.2f}s"
     divider(f"{SCRIPT_NAME} {tag} in {elapsed_time}")
@@ -265,7 +266,6 @@ def check_ip_info(proxies=None):
         return "未知", "未知"
 
 def run_account(account) -> bool:
-    # 恢复完整的 ctx 数据结构
     ctx = {
         "SERVER_NAME": account["name"],
         "START_TIME": time.time(),
@@ -282,7 +282,6 @@ def run_account(account) -> bool:
     log(f"🕐 运行时间: {now_str()}")
     log(f"🖥 服务器: {ctx['SERVER_NAME']}")
 
-    # 优先获取直连 IP 数据
     ctx["DIRECT_IP"], ctx["DIRECT_COUNTRY"] = check_ip_info()
 
     if USE_PROXY:
@@ -293,7 +292,6 @@ def run_account(account) -> bool:
                 test_resp = requests.get(LOGIN_PAGE, headers=BASE_HEADERS, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
                 if test_resp.status_code == 200 and 'name="uniqid"' in test_resp.text:
                     ctx["PROXY_AVAILABLE"] = True
-                    # 记录代理 IP 详情
                     ctx["PROXY_IP"], ctx["PROXY_COUNTRY"] = proxy_ip, proxy_country
                     ctx["ACTUAL_MODE"] = "代理"
                     ctx["ACTUAL_IP"], ctx["ACTUAL_COUNTRY"] = proxy_ip, proxy_country
@@ -322,7 +320,7 @@ def run_account(account) -> bool:
                 
             if not uniqid_match:
                 NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ 未找到登录 uniqid", "未知", "0小时0分")
+                return finish_account(ctx, False, "❌ 未找到登录 uniqid", "未知", "未知", "0小时0分")
 
             session.post(
                 LOGIN_URL,
@@ -333,7 +331,7 @@ def run_account(account) -> bool:
             
             if not session.cookies.get("X2SESSID"):
                 NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ 登录失败", "未知", "0小时0分")
+                return finish_account(ctx, False, "❌ 登录失败", "未知", "未知", "0小时0分")
             log("✅ 登录成功")
 
             log("🔗 跳转到游戏面板...")
@@ -341,7 +339,7 @@ def run_account(account) -> bool:
             jumpvps_match = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", resp.text)
             if not jumpvps_match:
                 NEXT_RUN_MINUTES.append(-1)
-                return finish_account(ctx, False, "❌ 未找到 jumpvps 链接", "未知", "0小时0分")
+                return finish_account(ctx, False, "❌ 未找到 jumpvps 链接", "未知", "未知", "0小时0分")
 
             server_id = jumpvps_match.group(1)
             resp2 = session.get(f"{BASE_URL}/xapanel/xmgame/jumpvps/?id={server_id}", headers={**BASE_HEADERS, "referer": XMGAME_INDEX_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
@@ -360,30 +358,30 @@ def run_account(account) -> bool:
             log("✅ 游戏面板 Session 获取成功")
         except Exception as e:
             NEXT_RUN_MINUTES.append(-1)
-            return finish_account(ctx, False, f"❌ 登录网络异常: {e}", "未知", "0小时0分")
+            return finish_account(ctx, False, f"❌ 登录网络异常: {e}", "未知", "未知", "0小时0分")
 
         log("📋 读取服务器信息...")
         resp_info = session.get(INFO_URL, headers={**BASE_HEADERS, "referer": BASE_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
         resp_info.encoding = "EUC-JP"
         h_before, m_before, dl_before, is_expired = parse_remaining(resp_info.text)
         
-        exact_dl_before = format_exact_deadline(h_before, m_before, dl_before)
+        cst_before = get_exact_cst_time(h_before, m_before)
         remaining_str_before = f"{h_before} 小时 {m_before} 分"
 
         if is_expired:
             log(f"⚠️ 服务器已过期（{dl_before}），直接尝试续期...")
         else:
-            log(f"📅 当前利用期限：{exact_dl_before}")
+            log(f"📅 当前利用期限：{dl_before} (CST: {cst_before})")
             log(f"⏳ 剩余时间：{remaining_str_before}")
             if h_before >= RENEW_THRESHOLD_HOURS:
                 NEXT_RUN_MINUTES.append(h_before * 60 + m_before)
-                return finish_account(ctx, True, "⌛️ 期限未至（无需续期）", exact_dl_before, remaining_str_before)
+                return finish_account(ctx, True, "⌛️ 期限未至（无需续期）", dl_before, cst_before, remaining_str_before)
 
             resp_extend = session.get(EXTEND_URL, headers={**BASE_HEADERS, "referer": INFO_URL}, timeout=DEFAULT_TIMEOUT, proxies=ctx["PROXIES"])
             resp_extend.encoding = "EUC-JP"
             if not can_renew(resp_extend.text):
                 NEXT_RUN_MINUTES.append(h_before * 60 + m_before)
-                return finish_account(ctx, True, "⌛️ 期限未至（暂不可续期）", exact_dl_before, remaining_str_before)
+                return finish_account(ctx, True, "⌛️ 期限未至（暂不可续期）", dl_before, cst_before, remaining_str_before)
 
         log("🔄 开始续期...")
         try:
@@ -394,7 +392,7 @@ def run_account(account) -> bool:
                 lt_match = re.search(r'name=["\']login_token["\']\s+value=["\']([^"\']+)["\']', resp_renew.text)
                 if not lt_match:
                     NEXT_RUN_MINUTES.append(-1)
-                    return finish_account(ctx, False, "❌ 未能在续期页找到 login_token", exact_dl_before, remaining_str_before)
+                    return finish_account(ctx, False, "❌ 未能在续期页找到 login_token", dl_before, cst_before, remaining_str_before)
                 form_data_conf["login_token"] = lt_match.group(1)
             
             if "period" not in form_data_conf:
@@ -428,7 +426,7 @@ def run_account(account) -> bool:
             )
         except Exception as e:
             NEXT_RUN_MINUTES.append(-1)
-            return finish_account(ctx, False, f"❌ 续期请求抛出异常: {e}", exact_dl_before, remaining_str_before)
+            return finish_account(ctx, False, f"❌ 续期请求抛出异常: {e}", dl_before, cst_before, remaining_str_before)
 
         log("⏳ 等待系统更新...")
         time.sleep(3)
@@ -437,8 +435,8 @@ def run_account(account) -> bool:
         resp_after.encoding = "EUC-JP"
         h_after, m_after, dl_after, expired_after = parse_remaining(resp_after.text)
         
-        exact_dl_after = format_exact_deadline(h_after, m_after, dl_after)
-        log(f"📅 续期后利用期限：{exact_dl_after}")
+        cst_after = get_exact_cst_time(h_after, m_after)
+        log(f"📅 续期后利用期限：{dl_after} (CST: {cst_after})")
         remaining_str_after = f"{h_after} 小时 {m_after} 分"
 
         success = False
@@ -450,11 +448,11 @@ def run_account(account) -> bool:
         if success:
             log("✅ 续期成功！")
             NEXT_RUN_MINUTES.append(h_after * 60 + m_after)
-            return finish_account(ctx, True, "✅ 续期成功！", exact_dl_after, remaining_str_after)
+            return finish_account(ctx, True, "✅ 续期成功！", dl_after, cst_after, remaining_str_after)
         else:
             log("❌ 续期失败，时间未变化")
             NEXT_RUN_MINUTES.append(-1)
-            return finish_account(ctx, False, "❌ 续期后期限未延伸", exact_dl_after or exact_dl_before, remaining_str_after)
+            return finish_account(ctx, False, "❌ 续期后期限未延伸", dl_after or dl_before, cst_after or cst_before, remaining_str_after)
 
 def main():
     failed = 0
