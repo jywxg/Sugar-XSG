@@ -3,7 +3,7 @@ name: XServer-Game-Renew
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [renew-trigger]
+    types: [renew-trigger] # 接收来自 Cloudflare Worker 的唤醒信号
 
 # 🔑 赋予 GitHub Actions 提交代码及清理 Workflow 历史记录的写入权限
 permissions:
@@ -41,9 +41,9 @@ jobs:
           IS_PROXY: ${{ env.USE_PROXY }}
           PROXY_STATUS: ${{ env.PROXY_STATUS }}
           TG_BOT: ${{ secrets.TG_BOT }}
-          # 👇 替换为了 cron-job.org 变量
-          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
-          CRONJOB_ID: ${{ secrets.CRONJOB_ID }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_SCRIPT_NAME: ${{ secrets.CF_SCRIPT_NAME }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python3 xserver_game_renew.py
 
       - name: ⏱️ 更新运行记录
