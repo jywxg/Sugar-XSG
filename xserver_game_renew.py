@@ -159,55 +159,78 @@ def extract_form_data(html: str) -> dict:
         
     return data
 
-def update_cf_cron(remaining_hours: int, remaining_minutes: int) -> tuple:
-    """计算并在 CF 中更新下一次执行的 CRON，返回状态元组"""
-    cf_account_id = os.environ.get("CF_ACCOUNT_ID", "")
-    cf_script_name = os.environ.get("CF_SCRIPT_NAME", "")
-    cf_api_token = os.environ.get("CF_API_TOKEN", "")
+def update_cronjob_org(remaining_hours: int, remaining_minutes: int) -> tuple:
+    """计算并在 cron-job.org 中更新下一次执行的计划，返回状态元组"""
+    api_key = os.environ.get("CRONJOB_API_KEY", "")
+    job_id = os.environ.get("CRONJOB_ID", "")
     
     cron_str = "未知"
     cst_next_run_str = "未知"
 
-    if not all([cf_account_id, cf_script_name, cf_api_token]):
-        log("\n⚠️ 未配置完整的 Cloudflare 变量，跳过 Cron 更新")
-        return False, "⚠️ 未配置 CF 环境变量", cron_str, cst_next_run_str
+    if not all([api_key, job_id]):
+        log("\n⚠️ 未配置 cron-job.org 变量(CRONJOB_API_KEY, CRONJOB_ID)，跳过更新")
+        return False, "⚠️ 未配置 cron-job 环境变量", cron_str, cst_next_run_str
 
     if remaining_hours < 0:
-        cron_str = "0 */2 * * *"
-        cst_next_run_str = "兜底每2小时"
-        log("\n⚠️ 账号状态异常或未取得剩余时间，Cron 兜底设为每 2 小时运行: 0 */2 * * *")
+        cst_next_run_str = "兜底每小时"
+        cron_str = "0 * * * *"
+        log("\n⚠️ 账号状态异常或未取得剩余时间，Cron 兜底设为每小时运行: 0 * * * *")
+        schedule_payload = {
+            "timezone": "UTC",
+            "hours": [-1],
+            "minutes": [0],
+            "mdays": [-1],
+            "months": [-1],
+            "wdays": [-1]
+        }
     else:
         total_remaining_minutes = remaining_hours * 60 + remaining_minutes
         wait_minutes = max(10, total_remaining_minutes - 230)
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         next_run_utc = now_utc + datetime.timedelta(minutes=wait_minutes)
-        cron_str = f"{next_run_utc.minute} {next_run_utc.hour} {next_run_utc.day} {next_run_utc.month} *"
         
+        cron_str = f"{next_run_utc.minute} {next_run_utc.hour} {next_run_utc.day} {next_run_utc.month} *"
         cst_next_run = next_run_utc.astimezone(datetime.timezone(datetime.timedelta(hours=8)))
         cst_next_run_str = cst_next_run.strftime('%Y-%m-%d %H:%M:%S')
+        
         log(f"\n⏱️ 预计下次触发 [UTC+8]: {cst_next_run_str}")
-        log(f"⏱️ 写入 CF Worker 的 Cron 表达式 (UTC): {cron_str}")
+        log(f"⏱️ 写入 cron-job.org 的计划 (UTC): {cron_str}")
 
-    url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/workers/scripts/{cf_script_name}/schedules"
+        schedule_payload = {
+            "timezone": "UTC",
+            "hours": [next_run_utc.hour],
+            "minutes": [next_run_utc.minute],
+            "mdays": [next_run_utc.day],
+            "months": [next_run_utc.month],
+            "wdays": [-1]
+        }
+
+    url = f"https://api.cron-job.org/jobs/{job_id}"
     headers = {
-        "Authorization": f"Bearer {cf_api_token}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+    }
+    
+    payload = {
+        "job": {
+            "schedule": schedule_payload
+        }
     }
 
     try:
-        resp = requests.put(url, json=[{"cron": cron_str}], headers=headers, timeout=15)
+        resp = requests.patch(url, json=payload, headers=headers, timeout=15)
         if resp.ok:
-            log("✅ 成功更新 Cloudflare Worker 的定时触发器 (Cron)！")
+            log("✅ 成功更新 cron-job.org 定时触发器！")
             return True, "✅ 更新成功", cron_str, cst_next_run_str
         else:
-            log(f"❌ 更新 Cloudflare Cron 失败: HTTP {resp.status_code} - {resp.text}")
+            log(f"❌ 更新 cron-job.org 失败: HTTP {resp.status_code} - {resp.text}")
             return False, f"❌ 更新失败 (HTTP {resp.status_code})", cron_str, cst_next_run_str
     except Exception as e:
-        log(f"❌ 调用 Cloudflare API 异常: {e}")
+        log(f"❌ 调用 cron-job.org API 异常: {e}")
         return False, "❌ 调用 API 异常", cron_str, cst_next_run_str
 
-def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: str, cf_info: dict = None):
+def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: str, cronjob_info: dict = None):
     if not TG_BOT:
         return
     parts = TG_BOT.split(",", 1)
@@ -236,16 +259,16 @@ def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: s
     network_str = "\n".join(network_info)
     cst_str = f"\n⏱️ 对应CST时间: {cst_dl}" if cst_dl and cst_dl != "未知" else ""
 
-    # 新增构建 CF 信息文本块
-    cf_str = ""
-    if cf_info:
-        cf_status = cf_info.get("status", "未知")
-        cf_cron = cf_info.get("cron", "未知")
-        cf_cst = cf_info.get("cst", "未知")
-        cf_str = (
-            f"☁️ CF 定时器: {cf_status}\n"
-            f"⏱️ 下次触发(CST): {cf_cst}\n"
-            f"⚙️ CRON (UTC): {cf_cron}\n"
+    # 构建 cron-job 信息文本块
+    cj_str = ""
+    if cronjob_info:
+        cj_status = cronjob_info.get("status", "未知")
+        cj_cron = cronjob_info.get("cron", "未知")
+        cj_cst = cronjob_info.get("cst", "未知")
+        cj_str = (
+            f"☁️ 定时器状态: {cj_status}\n"
+            f"⏱️ 下次触发(CST): {cj_cst}\n"
+            f"⚙️ 计划 (UTC): {cj_cron}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
         )
 
@@ -258,7 +281,7 @@ def notify_tg(ctx: dict, result: str, raw_dl: str, cst_dl: str, remaining_str: s
         f"📊 续期结果: {result}\n"
         f"🕐 执行时间: {now_str()}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{cf_str}"
+        f"{cj_str}"
         f"{network_str}"
     )
     
@@ -507,20 +530,20 @@ def main():
         if len(NEXT_RUN_MINUTES) == start_len:
             NEXT_RUN_MINUTES.append(-1)
 
-    # 2. 集中处理 CF Cron 定时器更新
+    # 2. 集中处理 cron-job.org 定时器更新
     if not NEXT_RUN_MINUTES or -1 in NEXT_RUN_MINUTES:
-        _, cf_msg, cf_cron, cf_cst = update_cf_cron(-1, -1)
+        _, cj_msg, cj_cron, cj_cst = update_cronjob_org(-1, -1)
     else:
         min_minutes = min(NEXT_RUN_MINUTES)
-        _, cf_msg, cf_cron, cf_cst = update_cf_cron(min_minutes // 60, min_minutes % 60)
+        _, cj_msg, cj_cron, cj_cst = update_cronjob_org(min_minutes // 60, min_minutes % 60)
 
-    cf_info = {
-        "status": cf_msg,
-        "cron": cf_cron,
-        "cst": cf_cst
+    cronjob_info = {
+        "status": cj_msg,
+        "cron": cj_cron,
+        "cst": cj_cst
     }
 
-    # 3. 将包含 CF 结果的信息统一发送给 TG
+    # 3. 将包含结果的信息统一发送给 TG
     for args in tg_tasks:
         notify_tg(
             ctx=args["ctx"],
@@ -528,7 +551,7 @@ def main():
             raw_dl=args["raw_dl"],
             cst_dl=args["cst_dl"],
             remaining_str=args["remaining_str"],
-            cf_info=cf_info
+            cronjob_info=cronjob_info
         )
 
     sys.exit(1 if failed else 0)
