@@ -1,0 +1,136 @@
+name: XServer-Game-Renew
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [renew-trigger]
+  schedule:
+    - cron: "0 0,12 * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      TZ: Asia/Shanghai
+      BROWSER_PATH: /usr/bin/google-chrome
+      DEBUG_DIR: ${{ github.workspace }}/debug
+      TURNSTILE_WAIT_SECONDS: "45"
+
+      XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }}
+      TG_BOT: ${{ secrets.TG_BOT }}
+      NODE_LINK: ${{ secrets.NODE_LINK }}
+
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_SCRIPT_NAME: ${{ secrets.CF_SCRIPT_NAME }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Cache pip packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-3.11-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-3.11-
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install Chrome / Xvfb / fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            fonts-noto-cjk \
+            fonts-noto-cjk-extra \
+            libnss3 \
+            libgbm1 \
+            libasound2t64 \
+            libxss1 \
+            libgtk-3-0
+          if ! command -v google-chrome >/dev/null 2>&1; then
+            wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+          fi
+          google-chrome --version
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start proxy
+        if: ${{ env.NODE_LINK != '' }}
+        shell: bash
+        run: |
+          chmod +x setup_proxy.sh
+          # 如果你使用当前仓库原版 setup_proxy.sh，
+          # 它会把代理变量写入 GITHUB_ENV。
+          ./setup_proxy.sh
+
+      - name: Run XServer browser renewal
+        shell: bash
+        run: |
+          mkdir -p "$DEBUG_DIR"
+          xvfb-run -a \
+            -s "-screen 0 1920x1080x24" \
+            python xserver_game_renew.py
+
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xserver-browser-debug
+          path: |
+            debug/*.txt
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Update run record
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "最后运行时间: $(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          git add time.txt
+          if git diff --cached --quiet; then
+            echo "无变化，无需提交"
+          else
+            git commit -m "⏱️ 自动更新运行记录，保活 Actions"
+            git stash -u || true
+            git pull origin main --rebase --autostash || git pull origin main
+            git stash pop || true
+            git push origin HEAD:main
+          fi
+
+      - name: Clean history runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          echo "🧹 清理历史运行记录（只保留本次 run: $GITHUB_RUN_ID）"
+          # gh --paginate 自动翻页，全仓库所有 run 全部拉出
+          runs=$(gh api "repos/$REPO/actions/runs?per_page=100" --paginate -q '.workflow_runs[].id' 2>/dev/null || true)
+          deleted=0
+          for run in $runs; do
+            if [ "$run" != "$GITHUB_RUN_ID" ]; then
+              echo "  删除历史记录 ID: $run"
+              gh api -X DELETE "repos/$REPO/actions/runs/$run" --silent || true
+              deleted=$((deleted + 1))
+            fi
+          done
+          echo "✅ 已清理 $deleted 条历史运行记录"
