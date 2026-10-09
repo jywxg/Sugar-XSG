@@ -91,6 +91,7 @@ def extract_form_data(html: str) -> dict:
             self.period_options = []
             self.in_period_select = False
             self.current_button = None
+            self.has_submit = False  # 页面是否存在任意提交按钮（不要求 action_ 前缀）
 
         def handle_starttag(self, tag, attrs):
             attrs = {str(k).lower(): (v or "") for k, v in attrs}
@@ -100,8 +101,10 @@ def extract_form_data(html: str) -> dict:
                 kind = attrs.get("type", "").lower()
                 if name and kind == "hidden":
                     self.data[name] = attrs.get("value", "")
-                elif name.startswith("action_") and kind in ("submit", "image", "button"):
-                    self.data[name] = attrs.get("value", "1") or "1"
+                elif kind in ("submit", "image", "button"):
+                    self.has_submit = True
+                    if name:
+                        self.data[name] = attrs.get("value", "1") or "1"
                 if name == "period" and attrs.get("value", "").isdigit():
                     self.period_options.append(int(attrs["value"]))
             elif tag == "select":
@@ -111,8 +114,9 @@ def extract_form_data(html: str) -> dict:
                 if value.isdigit():
                     self.period_options.append(int(value))
             elif tag == "button":
+                self.has_submit = True
                 name = attrs.get("name", "")
-                if name.startswith("action_"):
+                if name:
                     self.current_button = (name, attrs.get("value", "1") or "1")
 
         def handle_endtag(self, tag):
@@ -133,6 +137,7 @@ def extract_form_data(html: str) -> dict:
         return {}
     if parser.period_options:
         parser.data["period"] = str(max(parser.period_options))
+    parser.data["__has_submit__"] = parser.has_submit
     return parser.data
 
 def can_renew(page_html):
@@ -859,12 +864,13 @@ def submit_renewal(page, account_name):
             lt = re.search(r'name=["\']login_token["\']\s+value=["\']([^"\']+)["\']', r2.text)
             if lt:
                 form_conf["login_token"] = lt.group(1)
+        has_submit = form_conf.pop("__has_submit__", False)
         if "period" not in form_conf:
             log("❌ [续期] 输入页缺少 period 字段，停止提交")
             return False
-        if not any(k.startswith("action_") for k in form_conf.keys()):
-            log("❌ [续期] 输入页缺少提交按钮字段，停止提交")
-            return False
+        if not has_submit:
+            # 按钮可能无 name 或 name 不是 action_ 前缀，不再硬失败；隐藏字段完整即可尝试提交
+            log("⚠️ [续期] 输入页未检测到提交按钮字段，尝试直接提交")
         if not form_conf.get("login_token"):
             log("❌ [续期] 输入页缺少 login_token，可能会话失效，停止提交")
             return False
@@ -889,9 +895,9 @@ def submit_renewal(page, account_name):
             form_do["login_token"] = form_conf.get("login_token", "")
         if not form_do.get("period"):
             form_do["period"] = form_conf.get("period", "")
-        if not any(k.startswith("action_") for k in form_do.keys()):
-            log("❌ [续期] 确认页缺少执行按钮字段，停止提交")
-            return False
+        has_do_submit = form_do.pop("__has_submit__", False)
+        if not has_do_submit:
+            log("⚠️ [续期] 确认页未检测到执行按钮字段，尝试直接提交")
         if not form_do.get("login_token") or not form_do.get("period"):
             log("❌ [续期] 确认页缺少必要字段，停止提交")
             return False
