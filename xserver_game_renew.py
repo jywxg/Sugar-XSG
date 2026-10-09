@@ -391,12 +391,26 @@ def handle_turnstile(page):
 
         _click_turnstile(page, rect)
 
-        # 轮询：最多 15 秒，每 1 秒查一次 token；token 出现即成功
+        # 轮询：默认最多 30 秒（TURNSTILE_TOKEN_POLL_SECONDS 可调），每 1 秒查一次 token；
+        # token 出现即成功；challenges iframe 消失（挑战结束）时多等 2 秒确认 token
+        poll_seconds = int(os.getenv("TURNSTILE_TOKEN_POLL_SECONDS", "30"))
         token = ""
-        for _ in range(15):
+        for _ in range(poll_seconds):
             token = _get_turnstile_token(page)
             if token:
                 break
+            # 挑战 iframe 消失且 Turnstile 容器消失 → 挑战大概率已结束
+            if not has_cloudflare_iframe(page):
+                has_ct = False
+                try:
+                    has_ct = bool(page.run_js("return !!document.querySelector('.cf-turnstile');"))
+                except Exception:
+                    pass
+                if not has_ct:
+                    time.sleep(2)
+                    token = _get_turnstile_token(page)
+                    if token:
+                        break
             time.sleep(1)
         if token:
             # 刚拿到 token 时可能被 CF 重置，再确认一次稳定
