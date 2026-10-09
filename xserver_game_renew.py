@@ -1069,9 +1069,13 @@ def run_account(page, account):
 
     if success:
         NEXT_RUN_MINUTES.append(h_after * 60 + m_after)
+        log(f"📅 续期后利用期限: {dl_after}")
+        log(f"⏳ 续期后剩余: {remaining_after}")
         return True, "✅ 续期成功！", dl_after, cst_after, remaining_after
 
     NEXT_RUN_MINUTES.append(-1)
+    log(f"📅 续期后利用期限: {dl_after or dl_before}")
+    log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化", dl_after or dl_before, cst_after, remaining_after
 
 def main():
