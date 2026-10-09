@@ -127,7 +127,7 @@ url_decode() {
 # userinfo(%xx)解码：与 url_decode 不同，userinfo 中的 '+' 是字面加号，不转空格
 url_decode_userinfo() {
   local s="${1//\\/\\\\}"
-  printf '%b' "${s//%/\\x}" 2>/dev/null
+  printf '%b' "${s//%/\\x}" 2>/dev/null || echo ""
 }
 
 # 容错 Base64 解码 (支持 URL-Safe 且自动补齐 =)
@@ -139,11 +139,11 @@ safe_base64_decode() {
   echo "$input" | base64 -d 2>/dev/null || echo ""
 }
 
-# 安全参数提取 (原值)
+# 安全参数提取 (原值)；-m1 防同 key 多次匹配输出多行
 get_query_param() {
   local query="$1"
   local key="$2"
-  echo "&${query}" | grep -io "&${key}=[^&]*" | cut -d= -f2- || true
+  echo "&${query}" | grep -iom1 "&${key}=[^&]*" | cut -d= -f2- || true
 }
 
 # 安全参数提取 (强制小写)
@@ -178,6 +178,15 @@ parse_host_port() {
   else
     outbound_server="$input"
     outbound_port="$default_port"
+  fi
+}
+
+# 停止当前 sing-box（4 处重复逻辑收敛为一个函数，统一清理）
+stop_current() {
+  if [ -n "$CURRENT_SB_PID" ]; then
+    kill "$CURRENT_SB_PID" 2>/dev/null || true
+    wait "$CURRENT_SB_PID" 2>/dev/null || true
+    CURRENT_SB_PID=""
   fi
 }
 
@@ -249,7 +258,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
   # 默认允许不安全证书（避免 SNI 伪装导致的报错）；如需严格校验可导出 SB_INSECURE=false
   # 注意：insecure=true 会失去对服务端证书的校验，存在中间人风险，请自行权衡
   outbound_insecure="true"
-  [ "${SB_INSECURE:-true}" = "false" ] && outbound_insecure="false"
+  [ "$(printf '%s' "${SB_INSECURE:-true}" | tr '[:upper:]' '[:lower:]')" = "false" ] && outbound_insecure="false"
   
   outbound_alpn=""
 
@@ -534,17 +543,27 @@ for single_node in "${NODE_ARRAY[@]}"; do
   J_MTD=$(json_esc "$outbound_method")
   J_PLG=$(json_esc "$outbound_plugin")
   J_PLO=$(json_esc "$outbound_plugin_opts")
+  # 查询参数类（枚举值）也统一转义，杜绝 JSON 注入
+  J_TT=$(json_esc "$outbound_transport_type")
+  J_FP=$(json_esc "$outbound_fingerprint")
+  J_FLW=$(json_esc "$outbound_flow")
+  J_CC=$(json_esc "$outbound_congestion")
+  J_OBFT=$(json_esc "$outbound_obfs_type")
 
   jq_outbound="{\"type\":\"$outbound_type\",\"tag\":\"proxy\",\"server\":\"$J_SVR\",\"server_port\":$outbound_port"
   case "$outbound_type" in
     vless)
       jq_outbound="$jq_outbound,\"uuid\":\"$J_UID\""
-      if [ -n "$outbound_flow" ]; then jq_outbound="$jq_outbound,\"flow\":\"$outbound_flow\""; fi
-      if [ "$outbound_transport_type" != "tcp" ]; then 
-        jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$J_PTH\",\"headers\":{\"Host\":\"$J_HST\"}}"
+      if [ -n "$outbound_flow" ]; then jq_outbound="$jq_outbound,\"flow\":\"$J_FLW\""; fi
+      if [ "$outbound_transport_type" != "tcp" ]; then
+        if [ "$outbound_transport_type" = "grpc" ]; then
+          jq_outbound="$jq_outbound,\"transport\":{\"type\":\"grpc\",\"service_name\":\"$J_PTH\"}"
+        else
+          jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$J_TT\",\"path\":\"$J_PTH\",\"headers\":{\"Host\":\"$J_HST\"}}"
+        fi
       fi
       tls_enabled="false"; if [ "$outbound_security" = "tls" ] || [ "$outbound_security" = "reality" ]; then tls_enabled="true"; fi
-      tls_json="{\"enabled\":$tls_enabled,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}"
+      tls_json="{\"enabled\":$tls_enabled,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$J_FP\"}"
       if [ "$outbound_security" = "reality" ]; then tls_json="$tls_json,\"reality\":{\"enabled\":true,\"public_key\":\"$J_PBK\",\"short_id\":\"$J_SID\"}"; fi
       tls_json="$tls_json}"
       jq_outbound="$jq_outbound,\"tls\":$tls_json"
@@ -552,28 +571,36 @@ for single_node in "${NODE_ARRAY[@]}"; do
     vmess)
       jq_outbound="$jq_outbound,\"uuid\":\"$J_UID\",\"security\":\"auto\""
       if [ "$outbound_transport_type" != "tcp" ]; then
-        jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$J_PTH\",\"headers\":{\"Host\":\"$J_HST\"}}"
+        if [ "$outbound_transport_type" = "grpc" ]; then
+          jq_outbound="$jq_outbound,\"transport\":{\"type\":\"grpc\",\"service_name\":\"$J_PTH\"}"
+        else
+          jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$J_TT\",\"path\":\"$J_PTH\",\"headers\":{\"Host\":\"$J_HST\"}}"
+        fi
       fi
       tls_enabled="false"; if [ "$outbound_security" = "tls" ]; then tls_enabled="true"; fi
-      jq_outbound="$jq_outbound,\"tls\":{\"enabled\":$tls_enabled,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
+      jq_outbound="$jq_outbound,\"tls\":{\"enabled\":$tls_enabled,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$J_FP\"}}"
       ;;
     trojan)
       jq_outbound="$jq_outbound,\"password\":\"$J_PWD\""
       if [ "$outbound_transport_type" != "tcp" ]; then
-        jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$J_PTH\",\"headers\":{\"Host\":\"$J_HST\"}}"
+        if [ "$outbound_transport_type" = "grpc" ]; then
+          jq_outbound="$jq_outbound,\"transport\":{\"type\":\"grpc\",\"service_name\":\"$J_PTH\"}"
+        else
+          jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$J_TT\",\"path\":\"$J_PTH\",\"headers\":{\"Host\":\"$J_HST\"}}"
+        fi
       fi
-      jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
+      jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$J_FP\"}}"
       ;;
     hysteria2)
       jq_outbound="$jq_outbound,\"up_mbps\":$outbound_up_mbps,\"down_mbps\":$outbound_down_mbps"
-      if [ -n "$outbound_obfs_password" ]; then jq_outbound="$jq_outbound,\"obfs\":{\"type\":\"$outbound_obfs_type\",\"password\":\"$J_OBF\"}"; fi
+      if [ -n "$outbound_obfs_password" ]; then jq_outbound="$jq_outbound,\"obfs\":{\"type\":\"$J_OBFT\",\"password\":\"$J_OBF\"}"; fi
       if [ -n "$outbound_auth" ]; then jq_outbound="$jq_outbound,\"password\":\"$J_ATH\""; fi
       jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure}"
       ;;
     tuic)
       jq_outbound="$jq_outbound,\"uuid\":\"$J_UID\""
       if [ -n "$outbound_password2" ]; then jq_outbound="$jq_outbound,\"password\":\"$J_PW2\""; fi
-      jq_outbound="$jq_outbound,\"congestion_control\":\"$outbound_congestion\""
+      jq_outbound="$jq_outbound,\"congestion_control\":\"$J_CC\""
       if [ "$outbound_udp_over_stream" = "true" ]; then
         jq_outbound="$jq_outbound,\"udp_over_stream\":true"
       else
@@ -591,7 +618,7 @@ for single_node in "${NODE_ARRAY[@]}"; do
       ;;
     anytls)
       jq_outbound="$jq_outbound,\"password\":\"$J_PWD\""
-      jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
+      jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$J_SNI\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$J_FP\"}}"
       ;;
     socks)
       if [ -n "$outbound_username" ]; then jq_outbound="$jq_outbound,\"username\":\"$J_UNM\""; fi
@@ -628,11 +655,7 @@ EOF
 
   # 进程深度清理
   # 仅停止当前节点的 sing-box，快速切换，不影响其他进程
-  if [ -n "$CURRENT_SB_PID" ]; then
-    kill "$CURRENT_SB_PID" 2>/dev/null || true
-    wait "$CURRENT_SB_PID" 2>/dev/null || true
-    CURRENT_SB_PID=""
-  fi
+  stop_current
 
   ./sing-box run -c sing-box-config.json > sing-box.log 2>&1 &
   CURRENT_SB_PID=$!
@@ -641,14 +664,17 @@ EOF
   if ! kill -0 "$CURRENT_SB_PID" 2>/dev/null; then
     echo "[WARN] ❌ sing-box 启动失败 (配置参数校验不通过)，立即切换下一个..."
     if [ -f sing-box.log ]; then tail -n 5 sing-box.log; fi
-    wait "$CURRENT_SB_PID" 2>/dev/null || true
-    CURRENT_SB_PID=""
+    stop_current
     continue
   fi
 
   echo "[INFO] 测试节点连接性..."
   # 用 socks5h：DNS 解析走代理，避免本地 DNS 污染导致误判节点失效
   ip_info=$(_curl -x socks5h://127.0.0.1:1080 --max-time 8 https://ipinfo.io/json || true)
+  # ipinfo 偶发限流：备用端点
+  if [ -z "$ip_info" ]; then
+    ip_info=$(_curl -x socks5h://127.0.0.1:1080 --max-time 8 "https://api.ipify.org?format=json" || true)
+  fi
 
   if [ -n "$ip_info" ] && echo "$ip_info" | jq -e '.ip' > /dev/null 2>&1; then
     ip_addr=$(echo "$ip_info" | jq -r '.ip // "Unknown"' 2>/dev/null || echo "Unknown")
@@ -667,22 +693,14 @@ EOF
     if [ -s sing-box.log ]; then tail -n 3 sing-box.log; fi
 
     # 当前节点失败：只停止当前 PID，立即测试下一个节点
-    if [ -n "$CURRENT_SB_PID" ]; then
-      kill "$CURRENT_SB_PID" 2>/dev/null || true
-      wait "$CURRENT_SB_PID" 2>/dev/null || true
-      CURRENT_SB_PID=""
-    fi
+    stop_current
   fi
 done
 
 echo "[WARN] ❌ 所有配置的代理节点均测试失败，自动切换为直连模式！"
 
 # 所有节点都失败：只停止当前 PID，不影响其他 sing-box 进程
-if [ -n "$CURRENT_SB_PID" ]; then
-  kill "$CURRENT_SB_PID" 2>/dev/null || true
-  wait "$CURRENT_SB_PID" 2>/dev/null || true
-  CURRENT_SB_PID=""
-fi
+stop_current
 
 # 明确清除代理环境变量，避免后续 app.py 误认为代理仍然启用
 set_env "IS_PROXY" "false"
