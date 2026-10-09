@@ -870,7 +870,8 @@ def submit_renewal(page, account_name):
             return False
         if not has_submit:
             # 按钮可能无 name 或 name 不是 action_ 前缀，不再硬失败；隐藏字段完整即可尝试提交
-            log("⚠️ [续期] 输入页未检测到提交按钮字段，尝试直接提交")
+            # 注意：仅按钮缺失会继续直接提交；period/login_token 缺失仍会停止（防会话失效误续期）
+            log("⚠️ [续期] 输入页未检测到提交按钮字段，继续直接提交（period/login_token 仍会校验）")
         if not form_conf.get("login_token"):
             log("❌ [续期] 输入页缺少 login_token，可能会话失效，停止提交")
             return False
@@ -897,7 +898,8 @@ def submit_renewal(page, account_name):
             form_do["period"] = form_conf.get("period", "")
         has_do_submit = form_do.pop("__has_submit__", False)
         if not has_do_submit:
-            log("⚠️ [续期] 确认页未检测到执行按钮字段，尝试直接提交")
+            # 与输入页同理：按钮缺失仅警告并继续；必要字段缺失仍停止
+            log("⚠️ [续期] 确认页未检测到执行按钮字段，继续直接提交（period/login_token 仍会校验）")
         if not form_do.get("login_token") or not form_do.get("period"):
             log("❌ [续期] 确认页缺少必要字段，停止提交")
             return False
