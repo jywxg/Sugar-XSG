@@ -765,18 +765,34 @@ def _init_http_cookies(page):
 
 
 def _http_request(method, url, *, data=None, headers=None, timeout=20):
-    """函数式 curl_cffi 请求（每请求独立 TLS 指纹，无 jar 干扰）+ 自维护 cookie。"""
+    """函数式 curl_cffi 请求（每请求独立 TLS 指纹，无 jar 干扰）+ 自维护 cookie。
+
+    代理失效回退：走代理时连接层抛异常 → 清除代理直连重试一次。
+    """
     proxies = _proxies_dict()
     h = dict(headers or {})
     h["Cookie"] = _cookie_header()
     if _HTTP_UA:
         h.setdefault("User-Agent", _HTTP_UA)
-    if method == "POST":
-        r = curl_requests.post(url, headers=h, data=data, impersonate="chrome",
-                               timeout=timeout, proxies=proxies)
-    else:
-        r = curl_requests.get(url, headers=h, impersonate="chrome",
-                              timeout=timeout, proxies=proxies)
+    try:
+        if method == "POST":
+            r = curl_requests.post(url, headers=h, data=data, impersonate="chrome",
+                                   timeout=timeout, proxies=proxies)
+        else:
+            r = curl_requests.get(url, headers=h, impersonate="chrome",
+                                  timeout=timeout, proxies=proxies)
+    except Exception as e:
+        if proxies:
+            log(f"⚠️ HTTP 快速模式代理失败（{e}），清除代理直连重试...")
+            proxies = {}
+            if method == "POST":
+                r = curl_requests.post(url, headers=h, data=data, impersonate="chrome",
+                                       timeout=timeout)
+            else:
+                r = curl_requests.get(url, headers=h, impersonate="chrome",
+                                      timeout=timeout)
+        else:
+            raise
     _update_cookies_from_response(r)
     return r
 
@@ -810,6 +826,23 @@ def _request_retry(session, method, url, *, retries=2, impersonate="chrome", **k
             log(f"⚠️ {method} {url} 异常: {e}，重试 {attempt + 1}/{retries}...")
         time.sleep(2 * (attempt + 1))
     raise RuntimeError(f"{method} {url} 重试后仍失败")
+
+
+def _request_proxy_fallback(session, method, url, *, retries=2, **kwargs):
+    """带代理失效回退的请求：优先走配置代理（retries 次），连接层失败后清代理直连重试一次。
+
+    未配置代理时行为与 _request_retry 完全一致。代理异常（拒绝连接/超时等）属于
+    基础设施故障，直连重试不会破坏 cookie/UA 一致性（header 仍原样携带）。
+    """
+    if not get_proxy():
+        return _request_retry(session, method, url, retries=retries, **kwargs)
+    try:
+        return _request_retry(session, method, url, retries=retries, **kwargs)
+    except Exception as e:
+        log(f"⚠️ {method} {url} 代理请求失败（{e}），清除代理直连重试...")
+        kwargs = dict(kwargs)
+        kwargs.pop("proxies", None)
+        return _request_retry(session, method, url, retries=1, **kwargs)
 
 
 def submit_renewal(page, account_name):
@@ -846,7 +879,7 @@ def submit_renewal(page, account_name):
 
     try:
         log("🔄 [续期] GET 延长页面...")
-        r = _request_retry(session, "GET", EXTEND_URL, headers={"referer": INFO_URL}, timeout=20, proxies=proxies)
+        r = _request_proxy_fallback(session, "GET", EXTEND_URL, headers={"referer": INFO_URL}, timeout=20, proxies=proxies)
         r.encoding = "EUC-JP"
         if not r.ok:
             log(f"❌ [续期] 延长页 HTTP {r.status_code}")
@@ -863,7 +896,7 @@ def submit_renewal(page, account_name):
             return False
         log("🔄 [续期] 可续期，GET 续期输入页...")
 
-        r2 = _request_retry(session, "GET", RENEW_URL, headers={"referer": EXTEND_URL}, timeout=20, proxies=proxies)
+        r2 = _request_proxy_fallback(session, "GET", RENEW_URL, headers={"referer": EXTEND_URL}, timeout=20, proxies=proxies)
         r2.encoding = "EUC-JP"
         if not r2.ok:
             log(f"❌ [续期] 续期输入页 HTTP {r2.status_code}")
@@ -892,7 +925,7 @@ def submit_renewal(page, account_name):
 
         log("🔄 [续期] POST 确认页...")
         time.sleep(1)
-        r3 = _request_retry(session, "POST", CONF_URL,
+        r3 = _request_proxy_fallback(session, "POST", CONF_URL,
             headers={"content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": RENEW_URL},
             data=form_conf, timeout=20, proxies=proxies)
         r3.encoding = "EUC-JP"
@@ -920,7 +953,7 @@ def submit_renewal(page, account_name):
 
         log("🔄 [续期] POST 执行续期...")
         time.sleep(1)
-        r4 = _request_retry(session, "POST", DO_URL,
+        r4 = _request_proxy_fallback(session, "POST", DO_URL,
             headers={"content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": CONF_URL},
             data=form_do, timeout=20, proxies=proxies)
         r4.encoding = "EUC-JP"
@@ -984,7 +1017,7 @@ def check_ip_info():
     try:
         proxy = get_proxy()
         proxies = {"http": proxy, "https": proxy} if proxy else {}
-        r = _request_retry(None, "GET", IP_CHECK_URL, proxies=proxies, timeout=20)
+        r = _request_proxy_fallback(None, "GET", IP_CHECK_URL, proxies=proxies, timeout=20)
         d = r.json()
         return d.get("ip", "未知"), d.get("country", "未知")
     except Exception:
