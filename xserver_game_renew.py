@@ -163,7 +163,36 @@ def get_proxy():
     proxy = os.getenv("BROWSER_PROXY") or os.getenv("PROXY_HTTP_SERVER") or ""
     return proxy.strip()
 
-def build_options(profile=None):
+
+# 代理死亡全局标记：任一链路确认代理不可用后置 True，
+# 后续所有请求/浏览器直接跳过代理（一次确认，不再反复撞墙）。
+_PROXY_DEAD = False
+
+
+def _proxy_alive():
+    """探测代理是否可用：必须走代理成功才算活着（失败返回 False）。
+
+    仅在账号失败且尚未标记代理死亡时调用，用于区分"代理挂了"与"其他原因失败"，
+    避免对密码错误/页面改版等非代理问题盲目重开浏览器。
+
+    注意：必须打真实目标站（登录页），不能打 ipinfo.io 之类的中立站——
+    中立站通不代表目标站通（代理活着但出口 IP 被目标站/CF 拦截时，
+    中立站照样 200，会误判为"非代理问题"而错过直连重试）。
+    """
+    proxy = get_proxy()
+    if not proxy:
+        return True
+    try:
+        r = curl_requests.get(LOGIN_PAGE,
+                              proxies={"http": proxy, "https": proxy},
+                              impersonate="chrome", timeout=10)
+        log(f"🔍 代理探测: 登录页 → HTTP {r.status_code}")
+        return bool(r.ok)
+    except Exception as e:
+        log(f"⚠️ 代理健康检查失败: {e}")
+        return False
+
+def build_options(profile=None, use_proxy=True):
     co = ChromiumOptions()
     browser_path = os.getenv("BROWSER_PATH", "/usr/bin/google-chrome")
     if os.path.exists(browser_path):
@@ -173,9 +202,11 @@ def build_options(profile=None):
     co.set_user_data_path(str(Path(profile).resolve()))
 
     proxy = get_proxy()
-    if proxy:
+    if proxy and use_proxy:
         co.set_proxy(proxy)
         log(f"🌐 Chrome 代理: {proxy}")
+    elif proxy and not use_proxy:
+        log("🌐 Chrome 无代理（直连重试）")
 
     # GitHub Actions + Xvfb 下运行有头 Chrome。
     co.set_argument("--window-size=1920,1080")
@@ -378,6 +409,7 @@ def handle_turnstile(page):
         log("ℹ️ 当前页面未发现 Turnstile 控件，继续正常流程")
         return True
 
+    miss_streak = 0  # 连续找不到容器的次数；连续 2 次直接走失败路径（省最坏 45s/账号）
     for attempt in range(5):
         rect = None
         for _ in range(15):
@@ -386,8 +418,13 @@ def handle_turnstile(page):
                 break
             time.sleep(1)
         if not rect:
+            miss_streak += 1
             log(f"⚠️ 第 {attempt+1} 次没找到 Turnstile 容器")
+            if miss_streak >= 2:
+                log("⚠️ 连续 2 次找不到 Turnstile 容器，提前放弃")
+                break
             continue
+        miss_streak = 0
 
         _click_turnstile(page, rect)
 
@@ -767,9 +804,11 @@ def _init_http_cookies(page):
 def _http_request(method, url, *, data=None, headers=None, timeout=20):
     """函数式 curl_cffi 请求（每请求独立 TLS 指纹，无 jar 干扰）+ 自维护 cookie。
 
-    代理失效回退：走代理时连接层抛异常 → 清除代理直连重试一次。
+    代理失效回退：走代理时连接层抛异常 → 标记代理死亡 → 清除代理直连重试一次；
+    已标记死亡后直接跳过代理（不再撞墙）。
     """
-    proxies = _proxies_dict()
+    global _PROXY_DEAD
+    proxies = {} if _PROXY_DEAD else _proxies_dict()
     h = dict(headers or {})
     h["Cookie"] = _cookie_header()
     if _HTTP_UA:
@@ -783,7 +822,8 @@ def _http_request(method, url, *, data=None, headers=None, timeout=20):
                                   timeout=timeout, proxies=proxies)
     except Exception as e:
         if proxies:
-            log(f"⚠️ HTTP 快速模式代理失败（{e}），清除代理直连重试...")
+            _PROXY_DEAD = True
+            log(f"⚠️ HTTP 快速模式代理失败（{e}），标记代理死亡，清除代理直连重试...")
             proxies = {}
             if method == "POST":
                 r = curl_requests.post(url, headers=h, data=data, impersonate="chrome",
@@ -831,18 +871,51 @@ def _request_retry(session, method, url, *, retries=2, impersonate="chrome", **k
 def _request_proxy_fallback(session, method, url, *, retries=2, **kwargs):
     """带代理失效回退的请求：优先走配置代理（retries 次），连接层失败后清代理直连重试一次。
 
-    未配置代理时行为与 _request_retry 完全一致。代理异常（拒绝连接/超时等）属于
-    基础设施故障，直连重试不会破坏 cookie/UA 一致性（header 仍原样携带）。
+    已标记代理死亡（_PROXY_DEAD）时直接跳过代理直连。代理异常属于基础设施故障，
+    直连重试不会破坏 cookie/UA 一致性（header 仍原样携带）。
     """
-    if not get_proxy():
+    global _PROXY_DEAD
+    if not get_proxy() or _PROXY_DEAD:
+        kwargs = dict(kwargs)
+        kwargs.pop("proxies", None)
         return _request_retry(session, method, url, retries=retries, **kwargs)
     try:
         return _request_retry(session, method, url, retries=retries, **kwargs)
     except Exception as e:
-        log(f"⚠️ {method} {url} 代理请求失败（{e}），清除代理直连重试...")
+        _PROXY_DEAD = True
+        log(f"⚠️ {method} {url} 代理请求失败（{e}），标记代理死亡，清除代理直连重试...")
         kwargs = dict(kwargs)
         kwargs.pop("proxies", None)
         return _request_retry(session, method, url, retries=1, **kwargs)
+
+
+def _renew_step(session, method, url, label, headers, data=None, proxies=None,
+                merge_cf=False, cf_msg=None):
+    """续期流程通用一步：fallback 请求 → EUC-JP 编码 → 状态/CF 检查。
+
+    成功返回 response；失败打日志并返回 None（调用方直接 return False）。
+    请求异常（直连也失败）直接抛出，由 submit_renewal 的 except 统一处理（与原行为一致）。
+    label: 日志中的步骤名，如 "延长页"。
+    merge_cf: True 时把"状态异常"与"CF 拦截"合并为一条日志（确认页风格）。
+    cf_msg: CF 拦截时的自定义日志；不传则用默认格式。
+    """
+    if method == "GET":
+        r = _request_proxy_fallback(session, "GET", url, headers=headers, timeout=20, proxies=proxies)
+    else:
+        r = _request_proxy_fallback(session, "POST", url, headers=headers, data=data, timeout=20, proxies=proxies)
+    r.encoding = "EUC-JP"
+    if merge_cf:
+        if not r.ok or _resp_blocked_by_cf(r.text):
+            log(f"❌ [续期] {label}异常 HTTP {r.status_code}")
+            return None
+    else:
+        if not r.ok:
+            log(f"❌ [续期] {label} HTTP {r.status_code}")
+            return None
+        if _resp_blocked_by_cf(r.text):
+            log(cf_msg or f"❌ [续期] {label}被 Cloudflare 拦截（cookie 未通过校验）")
+            return None
+    return r
 
 
 def submit_renewal(page, account_name):
@@ -879,13 +952,9 @@ def submit_renewal(page, account_name):
 
     try:
         log("🔄 [续期] GET 延长页面...")
-        r = _request_proxy_fallback(session, "GET", EXTEND_URL, headers={"referer": INFO_URL}, timeout=20, proxies=proxies)
-        r.encoding = "EUC-JP"
-        if not r.ok:
-            log(f"❌ [续期] 延长页 HTTP {r.status_code}")
-            return False
-        if _resp_blocked_by_cf(r.text):
-            log("❌ [续期] 延长页被 Cloudflare 拦截（cookie 未通过校验）")
+        r = _renew_step(session, "GET", EXTEND_URL, "延长页",
+                        headers={"referer": INFO_URL}, proxies=proxies)
+        if r is None:
             return False
         eligibility = can_renew(r.text)
         if eligibility is False:
@@ -896,13 +965,9 @@ def submit_renewal(page, account_name):
             return False
         log("🔄 [续期] 可续期，GET 续期输入页...")
 
-        r2 = _request_proxy_fallback(session, "GET", RENEW_URL, headers={"referer": EXTEND_URL}, timeout=20, proxies=proxies)
-        r2.encoding = "EUC-JP"
-        if not r2.ok:
-            log(f"❌ [续期] 续期输入页 HTTP {r2.status_code}")
-            return False
-        if _resp_blocked_by_cf(r2.text):
-            log("❌ [续期] 续期输入页被 Cloudflare 拦截（cookie 未通过校验）")
+        r2 = _renew_step(session, "GET", RENEW_URL, "续期输入页",
+                         headers={"referer": EXTEND_URL}, proxies=proxies)
+        if r2 is None:
             return False
         form_conf = extract_form_data(r2.text)
         log(f"🔄 [续期] 表单字段: {list(form_conf.keys())}")
@@ -925,12 +990,10 @@ def submit_renewal(page, account_name):
 
         log("🔄 [续期] POST 确认页...")
         time.sleep(1)
-        r3 = _request_proxy_fallback(session, "POST", CONF_URL,
-            headers={"content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": RENEW_URL},
-            data=form_conf, timeout=20, proxies=proxies)
-        r3.encoding = "EUC-JP"
-        if not r3.ok or _resp_blocked_by_cf(r3.text):
-            log(f"❌ [续期] 确认页异常 HTTP {r3.status_code}")
+        r3 = _renew_step(session, "POST", CONF_URL, "确认页",
+                         headers={"content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": RENEW_URL},
+                         data=form_conf, proxies=proxies, merge_cf=True)
+        if r3 is None:
             return False
         # 注意：确认页正常会回显 login_token 隐藏域，不能把它当作会话失效标志；
         # 会话失效要看明确的登录提示文案（ログインしてください / ログイン画面）。
@@ -953,15 +1016,11 @@ def submit_renewal(page, account_name):
 
         log("🔄 [续期] POST 执行续期...")
         time.sleep(1)
-        r4 = _request_proxy_fallback(session, "POST", DO_URL,
-            headers={"content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": CONF_URL},
-            data=form_do, timeout=20, proxies=proxies)
-        r4.encoding = "EUC-JP"
-        if not r4.ok:
-            log(f"❌ [续期] 执行请求 HTTP {r4.status_code}")
-            return False
-        if _resp_blocked_by_cf(r4.text):
-            log("❌ [续期] 执行请求被 Cloudflare 拦截")
+        r4 = _renew_step(session, "POST", DO_URL, "执行请求",
+                         headers={"content-type": "application/x-www-form-urlencoded", "origin": BASE_URL, "referer": CONF_URL},
+                         data=form_do, proxies=proxies,
+                         cf_msg="❌ [续期] 执行请求被 Cloudflare 拦截")
+        if r4 is None:
             return False
         if any(marker in r4.text for marker in ("ログインしてください", "ログイン画面")):
             log("❌ [续期] 执行结果疑似会话失效")
@@ -1013,15 +1072,21 @@ def update_cf_cron(remaining_hours, remaining_minutes):
     except Exception as e:
         return False, f"❌ CF API 异常: {e}", cron_str, cst_next
 
+_IP_INFO_CACHE = None  # 模块级缓存：一次运行只查一次出口 IP（notify 阶段 N 个账号复用）
+
 def check_ip_info():
+    global _IP_INFO_CACHE
+    if _IP_INFO_CACHE is not None:
+        return _IP_INFO_CACHE
     try:
         proxy = get_proxy()
         proxies = {"http": proxy, "https": proxy} if proxy else {}
         r = _request_proxy_fallback(None, "GET", IP_CHECK_URL, proxies=proxies, timeout=20)
         d = r.json()
-        return d.get("ip", "未知"), d.get("country", "未知")
+        _IP_INFO_CACHE = (d.get("ip", "未知"), d.get("country", "未知"))
     except Exception:
-        return "未知", "未知"
+        _IP_INFO_CACHE = ("未知", "未知")
+    return _IP_INFO_CACHE
 
 def notify_tg(name, result, raw_dl, cst_dl, remaining, cf_info):
     if not TG_BOT:
@@ -1116,6 +1181,21 @@ def run_account(page, account):
 
     success = (expired and not expired_after) or (dl_after != dl_before) or (h_after > h_before)
 
+    if not success:
+        # 抖动兜底：提交成功但期限未变化，可能是服务器抖动没落上。
+        # 浏览器会话还热，再跑一次 submit_renewal，重读后重新判定。
+        # 若重试返回 None（暂不可续期），大概率第一次已落上，重读一次判定
+        # （防"已续上但显示滞后"误判）。判定以重读结果为准。
+        log(f"⚠️ {account['name']} 续期后期限未变化，重试一次...")
+        submit_renewal(page, account["name"])
+        time.sleep(3)
+        after_retry = read_info(page)
+        if after_retry:
+            h_after, m_after, dl_after, expired_after = after_retry
+            cst_after = get_exact_cst_time(h_after, m_after)
+            remaining_after = f"{h_after} 小时 {m_after} 分"
+            success = (expired and not expired_after) or (dl_after != dl_before) or (h_after > h_before)
+
     if success:
         NEXT_RUN_MINUTES.append(h_after * 60 + m_after)
         log(f"📅 续期后利用期限: {dl_after}")
@@ -1125,48 +1205,75 @@ def run_account(page, account):
     NEXT_RUN_MINUTES.append(-1)
     log(f"📅 续期后利用期限: {dl_after or dl_before}")
     log(f"⏳ 续期后剩余: {remaining_after}")
-    return False, "❌ 续期后期限未变化", dl_after or dl_before, cst_after, remaining_after
+    return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
 def main():
     failed = 0
     results = []
 
-    try:
-        # 每个账号使用独立、临时的 Chrome profile，避免多个账号共用 Cookie/登录态。
-        import tempfile
-        with tempfile.TemporaryDirectory(prefix="xserver-renew-") as temp_root:
-            for index, account in enumerate(ACCOUNTS):
-                page = None
-                try:
-                    profile = Path(temp_root) / f"account-{index + 1}"
-                    page = ChromiumPage(build_options(profile=str(profile)))
-                    result = run_account(page, account)
-                except Exception as e:
-                    log(f"❌ {account['name']} 致命异常: {e}")
-                    result = (False, f"❌ 致命异常: {e}", "未知", "未知", "0小时0分")
-                    NEXT_RUN_MINUTES.append(-1)
-                finally:
-                    if page is not None:
+    # 每个账号使用独立、临时的 Chrome profile，避免多个账号共用 Cookie/登录态。
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="xserver-renew-") as temp_root:
+        global _PROXY_DEAD
+        for index, account in enumerate(ACCOUNTS):
+            page = None
+            profile = Path(temp_root) / f"account-{index + 1}"
+            use_proxy_first = bool(get_proxy()) and not _PROXY_DEAD
+            try:
+                len_before = len(NEXT_RUN_MINUTES)
+                page = ChromiumPage(build_options(profile=str(profile), use_proxy=use_proxy_first))
+                result = run_account(page, account)
+                # 浏览器层代理失效回退：仅当"失败 + 配置了代理 + 确认代理已死"才无代理重开一次；
+                # 代理探测正常（非代理问题，如密码错/页面改版）不重试，避免盲重试烧时间。
+                if not result[0] and get_proxy():
+                    if _PROXY_DEAD:
+                        should_retry_direct = True
+                    else:
+                        alive = _proxy_alive()
+                        if not alive:
+                            _PROXY_DEAD = True
+                            should_retry_direct = True
+                        else:
+                            should_retry_direct = False
+                            log(f"ℹ️ {account['name']} 失败但代理探测正常（非代理问题），不重试")
+                    if should_retry_direct:
+                        log(f"🔄 {account['name']} 失败且代理已确认不可用，无代理直连重开一次...")
                         try:
                             page.quit()
                         except Exception:
                             pass
+                        # 直连重试用独立 profile，避免复用失败轮残留的半截 cookie/渲染状态
+                        direct_profile = Path(temp_root) / f"account-{index + 1}-direct"
+                        page = ChromiumPage(build_options(profile=str(direct_profile), use_proxy=False))
+                        result = run_account(page, account)
+                        if result[0]:
+                            # 重试成功后清除第一轮失败 append 的 -1，避免污染下次 cron 调度
+                            if len(NEXT_RUN_MINUTES) > len_before and NEXT_RUN_MINUTES[len_before] == -1:
+                                del NEXT_RUN_MINUTES[len_before]
+            except Exception as e:
+                log(f"❌ {account['name']} 致命异常: {e}")
+                result = (False, f"❌ 致命异常: {e}", "未知", "未知", "0小时0分")
+                NEXT_RUN_MINUTES.append(-1)
+            finally:
+                if page is not None:
+                    try:
+                        page.quit()
+                    except Exception:
+                        pass
 
-                results.append((account, result))
-                if not result[0]:
-                    failed += 1
+            results.append((account, result))
+            if not result[0]:
+                failed += 1
 
-        if not NEXT_RUN_MINUTES or -1 in NEXT_RUN_MINUTES:
-            cf = update_cf_cron(-1, -1)
-        else:
-            minutes = min(NEXT_RUN_MINUTES)
-            cf = update_cf_cron(minutes // 60, minutes % 60)
+    if not NEXT_RUN_MINUTES or -1 in NEXT_RUN_MINUTES:
+        cf = update_cf_cron(-1, -1)
+    else:
+        minutes = min(NEXT_RUN_MINUTES)
+        cf = update_cf_cron(minutes // 60, minutes % 60)
 
-        cf_info = {"status": cf[1], "cron": cf[2], "cst": cf[3]}
-        for account, result in results:
-            notify_tg(account["name"], result[1], result[2], result[3], result[4], cf_info)
-    finally:
-        pass
+    cf_info = {"status": cf[1], "cron": cf[2], "cst": cf[3]}
+    for account, result in results:
+        notify_tg(account["name"], result[1], result[2], result[3], result[4], cf_info)
 
     sys.exit(1 if failed else 0)
 
