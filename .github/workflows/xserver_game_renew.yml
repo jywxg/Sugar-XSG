@@ -5,7 +5,7 @@ on:
   repository_dispatch:
     types: [renew-trigger]
   schedule:
-    - cron: "0 0,12 * * *"
+    - cron: "30 22,10 * * *"
 
 permissions:
   contents: write
