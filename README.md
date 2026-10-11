@@ -122,16 +122,13 @@ on:
   例如 `0 */12 * * *`（每 12 小时）作为兜底。
   注意：脚本每次续期完会**自动覆盖**这个 Cron Trigger 为"到期前 235 分钟"，
   所以手动添加的兜底仅在脚本未配置 CF 变量时长期生效。
-- **🔗 API 调用**：
+- **🔗 API 调用**（仅 POST，token 走 JSON body；GET 传 token 已下线）：
   ```bash
-  # GET 方式（token 走 query）
-  curl "https://<你的worker域名>/trigger?token=my-secret-token"
-
-  # POST 方式（token 走 JSON body）
   curl -X POST "https://<你的worker域名>/trigger" \
     -H "Content-Type: application/json" \
     -d '{"token": "my-secret-token"}'
   ```
+  返回 `200 OK` 即触发成功；60 秒内重复触发会返回 `429`（已自动去重）。
 
 ### 触发结果通知
 
