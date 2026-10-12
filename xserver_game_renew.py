@@ -12,6 +12,8 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
+SCRIPT_VERSION = "2026-10-11c"  # 启动时打印到日志，方便确认跑的是哪个版本
+
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -1240,6 +1242,7 @@ def run_account(page, account):
 def main():
     failed = 0
     results = []
+    log(f"📜 脚本版本: {SCRIPT_VERSION}")
 
     # 每个账号使用独立、临时的 Chrome profile，避免多个账号共用 Cookie/登录态。
     import tempfile
