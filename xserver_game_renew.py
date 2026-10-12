@@ -1156,13 +1156,16 @@ def run_account(page, account):
     divider(account["name"])
 
     if not browser_login(page, account):
+        NEXT_RUN_MINUTES.append(-1)  # 登录失败多半是瞬时问题，2 小时兜底重试，不按其他账号剩余时间排期
         return False, "❌ 登录失败", "未知", "未知", "0小时0分"
 
     if not open_game(page, account["name"]):
+        NEXT_RUN_MINUTES.append(-1)
         return False, "❌ 游戏面板打开失败", "未知", "未知", "0小时0分"
 
     info = read_info(page)
     if not info:
+        NEXT_RUN_MINUTES.append(-1)
         return False, "❌ 无法读取服务器信息", "未知", "未知", "0小时0分"
 
     h_before, m_before, dl_before, expired = info
