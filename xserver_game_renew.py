@@ -12,7 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "2026-10-11c"  # 启动时打印到日志，方便确认跑的是哪个版本
+SCRIPT_VERSION = "2026-10-11e"  # 启动时打印到日志，方便确认跑的是哪个版本
 
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
@@ -431,20 +431,14 @@ def handle_turnstile(page):
 
         # 容器出现在 DOM 里 ≠ widget 可交互：iframe 的 JS 可能还在初始化，
         # 此时点击会被吞掉（表现为"第一次必失败、第二次必成功"）。
-        # 轮询 iframe 真渲染出尺寸（最多 10 秒），替代固定 sleep 2s 猜时间；
-        # 注意：window.turnstile 在此站点的顶层 frame 不存在（widget 跑在 CF 的
-        # iframe 内），不作为就绪条件——之前因此 10 秒白等。
-        # 就绪后再重取一次坐标（防等待期间重渲染漂移），然后点击。
+        # 就绪检测必须与点击同语义：直接复用 _find_turnstile_rect（完整 fallback
+        # 链 + 尺寸检查），能拿到可点 rect 才算就绪；最多等 10 秒。
+        # （教训：之前只查 iframe 的探针与点击走的不是同一条链，在此站点永远
+        # false，白等 10 秒。）
         widget_ready = False
         for _ in range(20):
             try:
-                widget_ready = bool(page.run_js(
-                    "var el = document.querySelector('.cf-turnstile iframe[src*=\"challenges.cloudflare.com\"]') || "
-                    "document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');"
-                    "if (!el) return false;"
-                    "var r = el.getBoundingClientRect();"
-                    "return r.width > 0 && r.height > 0;"
-                ))
+                widget_ready = bool(_find_turnstile_rect(page))
             except Exception:
                 widget_ready = False
             if widget_ready:
