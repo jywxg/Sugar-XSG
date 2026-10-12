@@ -386,8 +386,9 @@ def _click_turnstile(page, rect):
 def handle_turnstile(page):
     """Turnstile 坐标点击（xmgame 需要）。
 
-    流程：已有 token → 直接通过；否则定位可点击区域 → 等待 2 秒确保 widget
-    就绪 → 点击 → 轮询等待 token 出现 / 挑战消失（不再固定等待 3 秒）。
+    流程：已有 token → 直接通过；否则定位可点击区域 → 轮询等待 widget
+    真正就绪（Turnstile JS API + iframe）→ 点击 → 轮询等待 token 出现 /
+    挑战消失（不再固定等待 3 秒）。
     """
     log("🤖 检查 Turnstile...")
     if _get_turnstile_token(page):
@@ -428,8 +429,24 @@ def handle_turnstile(page):
 
         # 容器出现在 DOM 里 ≠ widget 可交互：iframe 的 JS 可能还在初始化，
         # 此时点击会被吞掉（表现为"第一次必失败、第二次必成功"）。
-        # 等 2 秒让 widget 就绪，再重取一次坐标（防等待期间重渲染漂移），然后点击。
-        time.sleep(2)
+        # 轮询 Turnstile JS API + iframe 真就绪（最多 10 秒），替代固定 sleep 2s 猜时间；
+        # 就绪后再重取一次坐标（防等待期间重渲染漂移），然后点击。
+        widget_ready = False
+        for _ in range(20):
+            try:
+                widget_ready = bool(page.run_js(
+                    "return (typeof turnstile !== 'undefined') && "
+                    "!!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');"
+                ))
+            except Exception:
+                widget_ready = False
+            if widget_ready:
+                break
+            time.sleep(0.5)
+        if widget_ready:
+            time.sleep(1)  # 就绪后再稳 1 秒
+        else:
+            log("⚠️ Turnstile widget 10 秒未就绪，仍尝试点击")
         rect_fresh = _find_turnstile_rect(page)
         if rect_fresh:
             rect = rect_fresh
