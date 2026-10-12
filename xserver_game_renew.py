@@ -412,10 +412,6 @@ def handle_turnstile(page):
 
     miss_streak = 0  # 连续找不到容器的次数；连续 2 次直接走失败路径（省最坏 45s/账号）
     for attempt in range(5):
-        if attempt > 0 and _get_turnstile_token(page):
-            # 上一轮点击可能已生效只是 token 来得慢：先确认，避免对已验证的 widget 重复点击
-            log("✅ Turnstile 验证通过")
-            return True
         rect = None
         for _ in range(15):
             rect = _find_turnstile_rect(page)
@@ -457,10 +453,8 @@ def handle_turnstile(page):
         _click_turnstile(page, rect)
 
         # 轮询：默认最多 30 秒（TURNSTILE_TOKEN_POLL_SECONDS 可调），每 1 秒查一次 token；
-        # token 出现即成功；challenges iframe 消失（挑战结束）时多等 2 秒确认 token。
-        # 首轮只短轮询 10 秒：第一次点击可能撞上 widget 初始化竞态被吞，
-        # 快速失败立刻重试（重试时 widget 必定已就绪）；后续轮次用完整轮询。
-        poll_seconds = 10 if attempt == 0 else int(os.getenv("TURNSTILE_TOKEN_POLL_SECONDS", "30"))
+        # token 出现即成功；challenges iframe 消失（挑战结束）时多等 2 秒确认 token
+        poll_seconds = int(os.getenv("TURNSTILE_TOKEN_POLL_SECONDS", "30"))
         token = ""
         for _ in range(poll_seconds):
             token = _get_turnstile_token(page)
