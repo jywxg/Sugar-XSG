@@ -429,14 +429,19 @@ def handle_turnstile(page):
 
         # 容器出现在 DOM 里 ≠ widget 可交互：iframe 的 JS 可能还在初始化，
         # 此时点击会被吞掉（表现为"第一次必失败、第二次必成功"）。
-        # 轮询 Turnstile JS API + iframe 真就绪（最多 10 秒），替代固定 sleep 2s 猜时间；
+        # 轮询 iframe 真渲染出尺寸（最多 10 秒），替代固定 sleep 2s 猜时间；
+        # 注意：window.turnstile 在此站点的顶层 frame 不存在（widget 跑在 CF 的
+        # iframe 内），不作为就绪条件——之前因此 10 秒白等。
         # 就绪后再重取一次坐标（防等待期间重渲染漂移），然后点击。
         widget_ready = False
         for _ in range(20):
             try:
                 widget_ready = bool(page.run_js(
-                    "return (typeof turnstile !== 'undefined') && "
-                    "!!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');"
+                    "var el = document.querySelector('.cf-turnstile iframe[src*=\"challenges.cloudflare.com\"]') || "
+                    "document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]');"
+                    "if (!el) return false;"
+                    "var r = el.getBoundingClientRect();"
+                    "return r.width > 0 && r.height > 0;"
                 ))
             except Exception:
                 widget_ready = False
