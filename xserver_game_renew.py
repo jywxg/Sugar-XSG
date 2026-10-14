@@ -876,6 +876,11 @@ def _resp_blocked_by_cf(text):
     return any(m in t for m in ("just a moment", "cf-chl-", "turnstile", "checking your browser"))
 
 
+def _mask_url(url):
+    """脱敏 URL 中的敏感片段（如 telegram bot token），避免打进日志。"""
+    return re.sub(r"(api\.telegram\.org/bot)[^/]+", r"\1<masked>", str(url))
+
+
 def _request_retry(session, method, url, *, retries=2, impersonate="chrome", **kwargs):
     """带简单重试的 HTTP 请求：对 5xx / 超时 / 连接错误自动重试 retries 次。
 
@@ -890,13 +895,13 @@ def _request_retry(session, method, url, *, retries=2, impersonate="chrome", **k
                 r = getattr(session, method.lower())(url, **kwargs)
             if r.ok or r.status_code < 500 or attempt >= retries:
                 return r
-            log(f"⚠️ {method} {url} HTTP {r.status_code}，重试 {attempt + 1}/{retries}...")
+            log(f"⚠️ {method} {_mask_url(url)} HTTP {r.status_code}，重试 {attempt + 1}/{retries}...")
         except Exception as e:
             if attempt >= retries:
                 raise
-            log(f"⚠️ {method} {url} 异常: {e}，重试 {attempt + 1}/{retries}...")
+            log(f"⚠️ {method} {_mask_url(url)} 异常: {e}，重试 {attempt + 1}/{retries}...")
         time.sleep(2 * (attempt + 1))
-    raise RuntimeError(f"{method} {url} 重试后仍失败")
+    raise RuntimeError(f"{method} {_mask_url(url)} 重试后仍失败")
 
 
 def _request_proxy_fallback(session, method, url, *, retries=2, **kwargs):
@@ -914,7 +919,7 @@ def _request_proxy_fallback(session, method, url, *, retries=2, **kwargs):
         return _request_retry(session, method, url, retries=retries, **kwargs)
     except Exception as e:
         _PROXY_DEAD = True
-        log(f"⚠️ {method} {url} 代理请求失败（{e}），标记代理死亡，清除代理直连重试...")
+        log(f"⚠️ {method} {_mask_url(url)} 代理请求失败（{e}），标记代理死亡，清除代理直连重试...")
         kwargs = dict(kwargs)
         kwargs.pop("proxies", None)
         return _request_retry(session, method, url, retries=1, **kwargs)
