@@ -12,7 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "1011n"  # 每次改版同步递增；启动日志会打印，用于确认仓库里跑的到底是哪一版
+SCRIPT_VERSION = "1011o"  # 每次改版同步递增；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -229,6 +229,8 @@ def build_options(profile=None, use_proxy=True):
     # 站点变慢适配（2026-10-22）：页面加载/脚本超时放宽，避免 20s+ 首字节下误杀；
     # base 同步放宽：登录提交后渲染器忙于慢导航时，page.html 等 DOM 读取的 CDP 调用
     # 默认只等 30s 会抛 "browser is stuck"（1011j 实测死点），须给足等待。
+    # base=120 只兜底「元素终会出现」的等待；凡是探「元素不存在」的探针
+    # （find_*、登录后密码框判定等）必须传显式短 timeout，否则每次等满 120s（1011o 修）
     co.set_timeouts(base=120, page_load=120, script=60)
 
     return co
@@ -293,7 +295,7 @@ def save_debug(page, account_name, reason):
     except Exception:
         pass
     try:
-        diag["has_password_field"] = bool(page.ele('css:input[name="user_password"]'))
+        diag["has_password_field"] = bool(page.ele('css:input[name="user_password"]', timeout=3))
     except Exception:
         pass
     try:
@@ -570,20 +572,20 @@ def wait_for_challenge(page, account_name):
 
 def find_input(page, name):
     try:
-        return page.ele(f'css:input[name="{name}"]')
+        return page.ele(f'css:input[name="{name}"]', timeout=8)
     except Exception:
         return None
 
 def find_button(page, names):
     for name in names:
         try:
-            ele = page.ele(f'css:input[name="{name}"]')
+            ele = page.ele(f'css:input[name="{name}"]', timeout=4)
             if ele:
                 return ele
         except Exception:
             pass
         try:
-            ele = page.ele(f'css:button[name="{name}"]')
+            ele = page.ele(f'css:button[name="{name}"]', timeout=4)
             if ele:
                 return ele
         except Exception:
@@ -592,14 +594,14 @@ def find_button(page, names):
 
 def click_first_action(page):
     try:
-        ele = page.ele('css:input[name^="action_"]')
+        ele = page.ele('css:input[name^="action_"]', timeout=4)
         if ele:
             ele.click()
             return True
     except Exception:
         pass
     try:
-        ele = page.ele('css:button[name^="action_"]')
+        ele = page.ele('css:button[name^="action_"]', timeout=4)
         if ele:
             ele.click()
             return True
@@ -658,7 +660,7 @@ def browser_login(page, account):
             if not submit:
                 # 某些页面提交按钮没有 name，尝试普通 submit。
                 try:
-                    submit = page.ele('css:input[type="submit"]')
+                    submit = page.ele('css:input[type="submit"]', timeout=5)
                 except Exception:
                     submit = None
 
@@ -690,7 +692,7 @@ def browser_login(page, account):
     still_on_login = "/xapanel/login" in page.url.lower()
     has_password_field = False
     try:
-        has_password_field = bool(page.ele('css:input[name="user_password"]'))
+        has_password_field = bool(page.ele('css:input[name="user_password"]', timeout=5))
     except Exception:
         pass
     if still_on_login or has_password_field:
@@ -743,7 +745,7 @@ def get_server_id(page):
         return None
 
     try:
-        links = page.eles('css:a[href*="/xapanel/xmgame/jumpvps/"]')
+        links = page.eles('css:a[href*="/xapanel/xmgame/jumpvps/"]', timeout=15)
         for link in links:
             href = link.attr("href") or ""
             m = re.search(r"[?&]id=(\d+)", href)
@@ -779,7 +781,7 @@ def open_game(page, account_name):
     # 优先点击表单的 submit；如果页面自动跳转则直接继续。
     clicked = False
     try:
-        submit = page.ele('css:form input[type="submit"]')
+        submit = page.ele('css:form input[type="submit"]', timeout=15)
         if submit:
             submit.click()
             clicked = True
