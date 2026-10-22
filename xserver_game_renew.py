@@ -12,7 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "1011o"  # 每次改版同步递增；启动日志会打印，用于确认仓库里跑的到底是哪一版
+SCRIPT_VERSION = "20261022b"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -493,7 +493,7 @@ def handle_turnstile(page):
         # （2026-10-11 教训：曾尝试首轮短轮询 10 秒"快速失败"，但若第一次点击启动
         # 的是个慢挑战，10 秒掐断重点击可能打断它，导致连挂；已回滚为统一 30 秒。
         # 不对称风险：短轮询最多省 20 秒，打断的代价是 5 连挂。）
-        poll_seconds = int(os.getenv("TURNSTILE_TOKEN_POLL_SECONDS", "120"))
+        poll_seconds = int(os.getenv("TURNSTILE_TOKEN_POLL_SECONDS", "30"))
         token = ""
         for _ in range(poll_seconds):
             token = _get_turnstile_token(page)
