@@ -229,7 +229,9 @@ def build_options(profile=None, use_proxy=True):
 
 def wait_page(page, seconds=2):
     try:
-        page.wait.load_start()
+        # load_start 只等"加载已开始"、最多 3 秒：不传 timeout 时按页面 base 超时
+        # 空等（本版默认 10s/次），wait_page 本意只是导航后喘一口气。
+        page.wait.load_start(timeout=3)
     except Exception:
         pass
     time.sleep(seconds)
@@ -675,7 +677,7 @@ def get_server_id(page):
         return sid
 
     # 3. 回退：浏览器加载面板 index
-    page.get(XMGAME_INDEX_URL)
+    page.get(XMGAME_INDEX_URL, timeout=15)
     wait_page(page, 2)
 
     if not wait_for_challenge(page, "xgame-index"):
@@ -705,7 +707,7 @@ def open_game(page, account_name):
 
     # 面板会话必须由真实浏览器执行 jumpvps 一次性表单才能建立（HTTP 模拟拿不到
     # 页面 JS 种的会话状态，会导致后续期限读取失败）。已过盾后加载只需数秒。
-    page.get(jump_url)
+    page.get(jump_url, timeout=15)
     wait_page(page, 2)
 
     if not wait_for_challenge(page, account_name):
@@ -715,7 +717,7 @@ def open_game(page, account_name):
     # 优先点击表单的 submit；如果页面自动跳转则直接继续。
     clicked = False
     try:
-        submit = page.ele('css:form input[type="submit"]')
+        submit = page.ele('css:form input[type="submit"]', timeout=5)
         if submit:
             submit.click()
             clicked = True
@@ -1246,7 +1248,11 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
+SCRIPT_VERSION = "20261022h"  # 基于用户上传的 -2 版修改：只治第二点（登录后段）延时
+
+
 def main():
+    log(f"🚀 脚本版本: {SCRIPT_VERSION}")
     failed = 0
     results = []
 
