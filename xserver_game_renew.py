@@ -239,6 +239,30 @@ def wait_page(page, seconds=2):
         pass
     time.sleep(seconds)
 
+def _wait_page_settled(page, timeout=90):
+    """等页面加载彻底落定（readyState=complete 且稳定 2 秒）后返回。
+
+    站点变慢适配（2026-10-22）：Turnstile 通过后 CF 常整页刷新一次发 clearance，
+    刷新没落定就取元素/填表会抛 "The page is refreshed"（1011k 实测死点：
+    找到 uniqid 后填表时页面刷新、元素引用失效）。超时也不阻塞流程，尽力而为。
+    """
+    end = time.time() + timeout
+    stable_since = None
+    while time.time() < end:
+        try:
+            state = page.run_js("return document.readyState")
+        except Exception:
+            state = None
+        if state == "complete":
+            if stable_since is None:
+                stable_since = time.time()
+            elif time.time() - stable_since >= 2:
+                return True
+        else:
+            stable_since = None
+        time.sleep(1)
+    return False
+
 def save_debug(page, account_name, reason):
     out = Path(os.getenv("DEBUG_DIR", "debug"))
     out.mkdir(parents=True, exist_ok=True)
@@ -599,6 +623,9 @@ def browser_login(page, account):
         if not handle_turnstile(page):
             log("❌ Turnstile 未通过（重试后仍失败）")
             return False
+
+    # Turnstile 通过后 CF 可能整页刷新，先等页面落定再找表单（防元素引用被刷新打失效）
+    _wait_page_settled(page, 90)
 
     uniqid = find_input(page, "uniqid")
     memberid = find_input(page, "memberid")
