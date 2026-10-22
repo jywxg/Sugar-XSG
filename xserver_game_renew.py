@@ -624,38 +624,61 @@ def browser_login(page, account):
             log("❌ Turnstile 未通过（重试后仍失败）")
             return False
 
-    # Turnstile 通过后 CF 可能整页刷新，先等页面落定再找表单（防元素引用被刷新打失效）
-    _wait_page_settled(page, 90)
-
-    uniqid = find_input(page, "uniqid")
-    memberid = find_input(page, "memberid")
-    password = find_input(page, "user_password")
-
-    if not memberid or not password:
-        save_debug(page, account["name"], "login_form_not_found")
-        log("❌ 未找到登录表单")
-        return False
-
-    if uniqid:
-        log("✅ 找到 uniqid")
-    memberid.input(account["email"])
-    password.input(account["password"])
-
-    submit = find_button(page, ["action_user_login", "service_login"])
-    if not submit:
-        # 某些页面提交按钮没有 name，尝试普通 submit。
+    # 站点变慢适配（2026-10-22）：CF/站点会在填表窗口里整页刷新，元素引用随时失效
+    # （1011k/1011l 实测：找到 uniqid 后填表时报 "The page is refreshed"；事前等落定拦不住）。
+    # 整段「找表单→填表→提交」做成最多 3 次重试：被打断就等落定、重新找元素再填。
+    _submitted = False
+    for _attempt in range(3):
+        _wait_page_settled(page, 90)
         try:
-            submit = page.ele('css:input[type="submit"]')
-        except Exception:
-            submit = None
+            uniqid = find_input(page, "uniqid")
+            memberid = find_input(page, "memberid")
+            password = find_input(page, "user_password")
 
-    if not submit:
-        save_debug(page, account["name"], "login_submit_not_found")
-        log("❌ 未找到登录按钮")
+            if not memberid or not password:
+                # 表单消失且已不在登录页 = 上一次提交其实已生效（随后页面才刷新）
+                if "/xapanel/login" not in page.url.lower():
+                    log("ℹ️ 登录表单已消失且不在登录页，视为已提交")
+                    _submitted = True
+                    break
+                if _attempt < 2:
+                    log(f"⚠️ 第 {_attempt+1} 次未找到登录表单，等页面落定后重试…")
+                    continue
+                save_debug(page, account["name"], "login_form_not_found")
+                log("❌ 未找到登录表单")
+                return False
+
+            if uniqid:
+                log("✅ 找到 uniqid")
+            memberid.input(account["email"])
+            password.input(account["password"])
+
+            submit = find_button(page, ["action_user_login", "service_login"])
+            if not submit:
+                # 某些页面提交按钮没有 name，尝试普通 submit。
+                try:
+                    submit = page.ele('css:input[type="submit"]')
+                except Exception:
+                    submit = None
+
+            if not submit:
+                if _attempt < 2:
+                    log(f"⚠️ 第 {_attempt+1} 次未找到登录按钮，等页面落定后重试…")
+                    continue
+                save_debug(page, account["name"], "login_submit_not_found")
+                log("❌ 未找到登录按钮")
+                return False
+
+            submit.click()
+            wait_page(page, 3)
+            _submitted = True
+            break
+        except Exception as e:
+            if _attempt >= 2:
+                raise
+            log(f"⚠️ 第 {_attempt+1} 次填表/提交被打断（{e}），等页面落定后重试…")
+    if not _submitted:
         return False
-
-    submit.click()
-    wait_page(page, 3)
 
     if not wait_for_challenge(page, account["name"]):
         return False
@@ -696,10 +719,15 @@ def _get_server_id_http(page):
 
 
 def get_server_id(page):
+    # 登录后页面可能仍在刷新，先等落定再读（防 page.html 读到一半被刷新打断）
+    _wait_page_settled(page, 90)
     # 1. 当前页面直接找（浏览器登录后页面通常已含 jumpvps 链接，零等待）
-    m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
-    if m:
-        return m.group(1)
+    try:
+        m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
 
     # 2. HTTP 快速模式：浏览器已登录+已过盾，直接请求面板 index
     sid = _get_server_id_http(page)
@@ -723,8 +751,11 @@ def get_server_id(page):
     except Exception:
         pass
 
-    m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
-    return m.group(1) if m else None
+    try:
+        m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
+        return m.group(1) if m else None
+    except Exception:
+        return None
 
 def open_game(page, account_name):
     server_id = get_server_id(page)
