@@ -13,8 +13,8 @@ permissions:
 
 jobs:
   renew:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     env:
       TZ: Asia/Shanghai
@@ -41,6 +41,8 @@ jobs:
           key: ${{ runner.os }}-pip-3.11-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-3.11-
+          restore-keys: |
+            ${{ runner.os }}-pip-3.11-
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -52,7 +54,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             xvfb \
-            fonts-noto-cjk \
+            fonts-ipafont-gothic \
             libnss3 \
             libgbm1 \
             libasound2t64 \
