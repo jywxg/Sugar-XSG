@@ -12,7 +12,6 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "20261022f"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -49,10 +48,8 @@ for item in re.split(r"[\n;]+", XSERVER_GAME_ACCOUNT.strip()):
         "password": parts[2].strip(),
     })
 
-_T0 = time.time()  # 进程内计时起点（20261022d）：日志行首 [+Ns]，定位哪段吃时间用
-
 def log(msg):
-    print(f"[+{int(time.time() - _T0):>4d}s] {msg}", flush=True)
+    print(msg, flush=True)
 
 def divider(label):
     log("=" * 20 + f" {label} " + "=" * 20)
@@ -188,7 +185,7 @@ def _proxy_alive():
     try:
         r = curl_requests.get(LOGIN_PAGE,
                               proxies={"http": proxy, "https": proxy},
-                              impersonate="chrome", timeout=60)
+                              impersonate="chrome", timeout=10)
         log(f"🔍 代理探测: 登录页 → HTTP {r.status_code}")
         return bool(r.ok)
     except Exception as e:
@@ -228,20 +225,6 @@ def build_options(profile=None, use_proxy=True):
         co.set_argument(f"--user-agent={ua}")
         log(f"🌐 Chrome UA: {ua[:80]}...")
 
-    # 站点变慢适配（2026-10-22）：页面加载/脚本超时放宽，避免 20s+ 首字节下误杀；
-    # base 同步放宽：登录提交后渲染器忙于慢导航时，page.html 等 DOM 读取的 CDP 调用
-    # 默认只等 30s 会抛 "browser is stuck"（1011j 实测死点），须给足等待。
-    # base=120 只兜底「元素终会出现」的等待；凡是探「元素不存在」的探针
-    # （find_*、登录后密码框判定等）必须传显式短 timeout，否则每次等满 120s（1011o 修）
-    co.set_timeouts(base=120, page_load=120, script=60)
-    # 导航只等文档解析完（20261022f，eager 二次尝试）：d 版单开 eager 翻车——
-    # get 在 CF interstitial 阶段就返回、Turnstile 容器没渲染出来就开找。
-    # 本版配套：browser_login / open_game 在导航后先过签名落定等待（等过
-    # interstitial 翻页与 DOM 生长）才找控件/表单；eager 只砍"真实页面已到、
-    # 子资源还挂着"的 load 事件尾巴（登录后 jumpvps 无 interstitial 仍卡
-    # 约 120s，证明那段纯粹是子资源尾巴，不是挑战本身）。
-    co.set_load_mode("eager")
-
     return co
 
 def wait_page(page, seconds=2):
@@ -250,45 +233,6 @@ def wait_page(page, seconds=2):
     except Exception:
         pass
     time.sleep(seconds)
-
-def _wait_page_settled(page, timeout=90):
-    """等页面加载落定后返回：页面签名（readyState|URL|body 长度）稳定 2 秒即算落定。
-
-    站点变慢适配（2026-10-22）：Turnstile 通过后 CF 常整页刷新一次发 clearance，
-    刷新没落定就取元素/填表会抛 "The page is refreshed"（1011k 实测死点：
-    找到 uniqid 后填表时页面刷新、元素引用失效）。超时也不阻塞流程，尽力而为。
-
-    落定条件放宽（20261022c）：旧版要求 readyState=complete，但登录后面板页
-    常有子资源经代理长期挂起、readyState 永远到不了 complete，每次把 90 秒
-    等满才继续（2026-10-22 实测"浏览器登录完成"后卡约 90 秒）。改看签名：
-    CF 刷新会改 URL/DOM 长度、HTML 还在流入时长度持续增长，签名一变就重置
-    稳定计时，防刷新与防抢跑的保护不变；DOM 已终态、只剩子资源挂起时，
-    约 3 秒即可判定落定。
-    """
-    end = time.time() + timeout
-    stable_since = None
-    last_sig = None
-    while time.time() < end:
-        try:
-            sig = page.run_js(
-                "return document.readyState + '|' + location.href + '|' + "
-                "(document.body ? document.body.innerHTML.length : 0)")
-        except Exception:
-            sig = None
-        if sig is not None and not sig.startswith("loading"):
-            if sig == last_sig:
-                if stable_since is None:
-                    stable_since = time.time()
-                elif time.time() - stable_since >= 2:
-                    return True
-            else:
-                last_sig = sig
-                stable_since = None
-        else:
-            last_sig = None
-            stable_since = None
-        time.sleep(1)
-    return False
 
 def save_debug(page, account_name, reason):
     out = Path(os.getenv("DEBUG_DIR", "debug"))
@@ -319,7 +263,7 @@ def save_debug(page, account_name, reason):
     except Exception:
         pass
     try:
-        diag["has_password_field"] = bool(page.ele('css:input[name="user_password"]', timeout=3))
+        diag["has_password_field"] = bool(page.ele('css:input[name="user_password"]'))
     except Exception:
         pass
     try:
@@ -570,7 +514,7 @@ def wait_for_challenge(page, account_name):
     log("ℹ️ 本程序不会破解或绕过验证码。")
     log("ℹ️ 如果挑战能由正常浏览器自动完成，将继续等待。")
 
-    timeout = int(os.getenv("TURNSTILE_WAIT_SECONDS", "120"))
+    timeout = int(os.getenv("TURNSTILE_WAIT_SECONDS", "45"))
     end = time.time() + timeout
     clicks = 0            # 已点击次数（最多 3 次）
     last_click_at = 0.0   # 上次点击时间戳
@@ -596,20 +540,20 @@ def wait_for_challenge(page, account_name):
 
 def find_input(page, name):
     try:
-        return page.ele(f'css:input[name="{name}"]', timeout=8)
+        return page.ele(f'css:input[name="{name}"]')
     except Exception:
         return None
 
 def find_button(page, names):
     for name in names:
         try:
-            ele = page.ele(f'css:input[name="{name}"]', timeout=4)
+            ele = page.ele(f'css:input[name="{name}"]')
             if ele:
                 return ele
         except Exception:
             pass
         try:
-            ele = page.ele(f'css:button[name="{name}"]', timeout=4)
+            ele = page.ele(f'css:button[name="{name}"]')
             if ele:
                 return ele
         except Exception:
@@ -618,14 +562,14 @@ def find_button(page, names):
 
 def click_first_action(page):
     try:
-        ele = page.ele('css:input[name^="action_"]', timeout=4)
+        ele = page.ele('css:input[name^="action_"]')
         if ele:
             ele.click()
             return True
     except Exception:
         pass
     try:
-        ele = page.ele('css:button[name^="action_"]', timeout=4)
+        ele = page.ele('css:button[name^="action_"]')
         if ele:
             ele.click()
             return True
@@ -637,8 +581,6 @@ def browser_login(page, account):
     divider(f"登录 {account['name']}")
     page.get(LOGIN_PAGE)
     wait_page(page, 2)
-    # eager 下先等过 interstitial 翻页 / DOM 生长再找 Turnstile（d 版教训）
-    _wait_page_settled(page, 90)
 
     # xmgame 需要手动点 Turnstile（已处理，无需再 wait_for_challenge）。
     # 若 5 次都失败，刷新页面重试一次（Chrome profile 保留首访信息，二次加载常更容易过 CF）
@@ -647,68 +589,41 @@ def browser_login(page, account):
         try:
             page.get(LOGIN_PAGE)
             wait_page(page, 2)
-            _wait_page_settled(page, 90)
         except Exception as e:
             log(f"⚠️ 刷新失败: {e}")
         if not handle_turnstile(page):
             log("❌ Turnstile 未通过（重试后仍失败）")
             return False
 
-    # 站点变慢适配（2026-10-22）：CF/站点会在填表窗口里整页刷新，元素引用随时失效
-    # （1011k/1011l 实测：找到 uniqid 后填表时报 "The page is refreshed"；事前等落定拦不住）。
-    # 整段「找表单→填表→提交」做成最多 3 次重试：被打断就等落定、重新找元素再填。
-    _submitted = False
-    for _attempt in range(3):
-        _wait_page_settled(page, 90)
-        try:
-            uniqid = find_input(page, "uniqid")
-            memberid = find_input(page, "memberid")
-            password = find_input(page, "user_password")
+    uniqid = find_input(page, "uniqid")
+    memberid = find_input(page, "memberid")
+    password = find_input(page, "user_password")
 
-            if not memberid or not password:
-                # 表单消失且已不在登录页 = 上一次提交其实已生效（随后页面才刷新）
-                if "/xapanel/login" not in page.url.lower():
-                    log("ℹ️ 登录表单已消失且不在登录页，视为已提交")
-                    _submitted = True
-                    break
-                if _attempt < 2:
-                    log(f"⚠️ 第 {_attempt+1} 次未找到登录表单，等页面落定后重试…")
-                    continue
-                save_debug(page, account["name"], "login_form_not_found")
-                log("❌ 未找到登录表单")
-                return False
-
-            if uniqid:
-                log("✅ 找到 uniqid")
-            memberid.input(account["email"])
-            password.input(account["password"])
-
-            submit = find_button(page, ["action_user_login", "service_login"])
-            if not submit:
-                # 某些页面提交按钮没有 name，尝试普通 submit。
-                try:
-                    submit = page.ele('css:input[type="submit"]', timeout=5)
-                except Exception:
-                    submit = None
-
-            if not submit:
-                if _attempt < 2:
-                    log(f"⚠️ 第 {_attempt+1} 次未找到登录按钮，等页面落定后重试…")
-                    continue
-                save_debug(page, account["name"], "login_submit_not_found")
-                log("❌ 未找到登录按钮")
-                return False
-
-            submit.click()
-            wait_page(page, 3)
-            _submitted = True
-            break
-        except Exception as e:
-            if _attempt >= 2:
-                raise
-            log(f"⚠️ 第 {_attempt+1} 次填表/提交被打断（{e}），等页面落定后重试…")
-    if not _submitted:
+    if not memberid or not password:
+        save_debug(page, account["name"], "login_form_not_found")
+        log("❌ 未找到登录表单")
         return False
+
+    if uniqid:
+        log("✅ 找到 uniqid")
+    memberid.input(account["email"])
+    password.input(account["password"])
+
+    submit = find_button(page, ["action_user_login", "service_login"])
+    if not submit:
+        # 某些页面提交按钮没有 name，尝试普通 submit。
+        try:
+            submit = page.ele('css:input[type="submit"]')
+        except Exception:
+            submit = None
+
+    if not submit:
+        save_debug(page, account["name"], "login_submit_not_found")
+        log("❌ 未找到登录按钮")
+        return False
+
+    submit.click()
+    wait_page(page, 3)
 
     if not wait_for_challenge(page, account["name"]):
         return False
@@ -719,7 +634,7 @@ def browser_login(page, account):
     still_on_login = "/xapanel/login" in page.url.lower()
     has_password_field = False
     try:
-        has_password_field = bool(page.ele('css:input[name="user_password"]', timeout=5))
+        has_password_field = bool(page.ele('css:input[name="user_password"]'))
     except Exception:
         pass
     if still_on_login or has_password_field:
@@ -749,15 +664,10 @@ def _get_server_id_http(page):
 
 
 def get_server_id(page):
-    # 登录后页面可能仍在刷新，先等落定再读（防 page.html 读到一半被刷新打断）
-    _wait_page_settled(page, 90)
     # 1. 当前页面直接找（浏览器登录后页面通常已含 jumpvps 链接，零等待）
-    try:
-        m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
+    m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
+    if m:
+        return m.group(1)
 
     # 2. HTTP 快速模式：浏览器已登录+已过盾，直接请求面板 index
     sid = _get_server_id_http(page)
@@ -772,7 +682,7 @@ def get_server_id(page):
         return None
 
     try:
-        links = page.eles('css:a[href*="/xapanel/xmgame/jumpvps/"]', timeout=15)
+        links = page.eles('css:a[href*="/xapanel/xmgame/jumpvps/"]')
         for link in links:
             href = link.attr("href") or ""
             m = re.search(r"[?&]id=(\d+)", href)
@@ -781,11 +691,8 @@ def get_server_id(page):
     except Exception:
         pass
 
-    try:
-        m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
-        return m.group(1) if m else None
-    except Exception:
-        return None
+    m = re.search(r"/xapanel/xmgame/jumpvps/\?id=(\d+)", page.html or "")
+    return m.group(1) if m else None
 
 def open_game(page, account_name):
     server_id = get_server_id(page)
@@ -800,8 +707,6 @@ def open_game(page, account_name):
     # 页面 JS 种的会话状态，会导致后续期限读取失败）。已过盾后加载只需数秒。
     page.get(jump_url)
     wait_page(page, 2)
-    # eager 下先等面板 DOM 落定再探一次性表单，防页面未长完就误判无表单
-    _wait_page_settled(page, 60)
 
     if not wait_for_challenge(page, account_name):
         return False
@@ -810,7 +715,7 @@ def open_game(page, account_name):
     # 优先点击表单的 submit；如果页面自动跳转则直接继续。
     clicked = False
     try:
-        submit = page.ele('css:form input[type="submit"]', timeout=15)
+        submit = page.ele('css:form input[type="submit"]')
         if submit:
             submit.click()
             clicked = True
@@ -927,7 +832,7 @@ def _init_http_cookies(page):
             pass
 
 
-def _http_request(method, url, *, data=None, headers=None, timeout=90):
+def _http_request(method, url, *, data=None, headers=None, timeout=20):
     """函数式 curl_cffi 请求（每请求独立 TLS 指纹，无 jar 干扰）+ 自维护 cookie。
 
     代理失效回退：走代理时连接层抛异常 → 标记代理死亡 → 清除代理直连重试一次；
@@ -1031,9 +936,9 @@ def _renew_step(session, method, url, label, headers, data=None, proxies=None,
     cf_msg: CF 拦截时的自定义日志；不传则用默认格式。
     """
     if method == "GET":
-        r = _request_proxy_fallback(session, "GET", url, headers=headers, timeout=90, proxies=proxies)
+        r = _request_proxy_fallback(session, "GET", url, headers=headers, timeout=20, proxies=proxies)
     else:
-        r = _request_proxy_fallback(session, "POST", url, headers=headers, data=data, timeout=90, proxies=proxies)
+        r = _request_proxy_fallback(session, "POST", url, headers=headers, data=data, timeout=20, proxies=proxies)
     r.encoding = "EUC-JP"
     if merge_cf:
         if not r.ok or _resp_blocked_by_cf(r.text):
@@ -1342,7 +1247,6 @@ def run_account(page, account):
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
 def main():
-    log(f"🚀 脚本版本: {SCRIPT_VERSION}")
     failed = 0
     results = []
 
