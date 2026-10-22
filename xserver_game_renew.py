@@ -12,7 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "20261022d"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
+SCRIPT_VERSION = "20261022e"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -234,12 +234,11 @@ def build_options(profile=None, use_proxy=True):
     # base=120 只兜底「元素终会出现」的等待；凡是探「元素不存在」的探针
     # （find_*、登录后密码框判定等）必须传显式短 timeout，否则每次等满 120s（1011o 修）
     co.set_timeouts(base=120, page_load=120, script=60)
-    # 导航不等 load 事件（20261022d）：默认 normal 下 page.get 要等 readyState=complete
-    # 才返回（DrissionPage _wait_loaded 源码确认）；子资源经代理挂起时每次导航吃满
-    # page_load=120s（2026-10-22 实测：开局登录页卡约 2 分钟、登录后 jumpvps 再卡）。
-    # eager 只等文档解析完（interactive），后续就绪判断本来就由签名落定 + 元素
-    # 探针负责，不依赖 load 事件。
-    co.set_load_mode("eager")
+    # 注（20261022e）：d 版曾试 set_load_mode("eager") 让 page.get 只等文档解析完，
+    # 实测翻车已回滚——eager 在 CF interstitial（Just a moment）阶段就返回，
+    # handle_turnstile 找不到 Turnstile 容器、两次刷新重试全败（d 版整轮失败）。
+    # normal 模式那段 load 等待客观上在替流程"等过 interstitial"，暂保留；
+    # 导航约 120s 的等待成本先认账，链路可用优先。
 
     return co
 
