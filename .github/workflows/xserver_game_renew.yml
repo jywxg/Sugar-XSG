@@ -53,7 +53,6 @@ jobs:
           sudo apt-get install -y \
             xvfb \
             fonts-noto-cjk \
-            fonts-noto-cjk-extra \
             libnss3 \
             libgbm1 \
             libasound2t64 \
