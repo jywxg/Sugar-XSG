@@ -41,8 +41,6 @@ jobs:
           key: ${{ runner.os }}-pip-3.11-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-3.11-
-          restore-keys: |
-            ${{ runner.os }}-pip-3.11-
 
       - name: Setup Python
         uses: actions/setup-python@v7
