@@ -225,8 +225,10 @@ def build_options(profile=None, use_proxy=True):
         co.set_argument(f"--user-agent={ua}")
         log(f"🌐 Chrome UA: {ua[:80]}...")
 
-    # 站点变慢适配（2026-10-22）：页面加载/脚本超时放宽，避免 20s+ 首字节下误杀
-    co.set_timeouts(page_load=120, script=60)
+    # 站点变慢适配（2026-10-22）：页面加载/脚本超时放宽，避免 20s+ 首字节下误杀；
+    # base 同步放宽：登录提交后渲染器忙于慢导航时，page.html 等 DOM 读取的 CDP 调用
+    # 默认只等 30s 会抛 "browser is stuck"（1011j 实测死点），须给足等待。
+    co.set_timeouts(base=120, page_load=120, script=60)
 
     return co
 
