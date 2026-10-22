@@ -12,7 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "20261022e"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
+SCRIPT_VERSION = "20261022f"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -234,11 +234,13 @@ def build_options(profile=None, use_proxy=True):
     # base=120 只兜底「元素终会出现」的等待；凡是探「元素不存在」的探针
     # （find_*、登录后密码框判定等）必须传显式短 timeout，否则每次等满 120s（1011o 修）
     co.set_timeouts(base=120, page_load=120, script=60)
-    # 注（20261022e）：d 版曾试 set_load_mode("eager") 让 page.get 只等文档解析完，
-    # 实测翻车已回滚——eager 在 CF interstitial（Just a moment）阶段就返回，
-    # handle_turnstile 找不到 Turnstile 容器、两次刷新重试全败（d 版整轮失败）。
-    # normal 模式那段 load 等待客观上在替流程"等过 interstitial"，暂保留；
-    # 导航约 120s 的等待成本先认账，链路可用优先。
+    # 导航只等文档解析完（20261022f，eager 二次尝试）：d 版单开 eager 翻车——
+    # get 在 CF interstitial 阶段就返回、Turnstile 容器没渲染出来就开找。
+    # 本版配套：browser_login / open_game 在导航后先过签名落定等待（等过
+    # interstitial 翻页与 DOM 生长）才找控件/表单；eager 只砍"真实页面已到、
+    # 子资源还挂着"的 load 事件尾巴（登录后 jumpvps 无 interstitial 仍卡
+    # 约 120s，证明那段纯粹是子资源尾巴，不是挑战本身）。
+    co.set_load_mode("eager")
 
     return co
 
@@ -635,6 +637,8 @@ def browser_login(page, account):
     divider(f"登录 {account['name']}")
     page.get(LOGIN_PAGE)
     wait_page(page, 2)
+    # eager 下先等过 interstitial 翻页 / DOM 生长再找 Turnstile（d 版教训）
+    _wait_page_settled(page, 90)
 
     # xmgame 需要手动点 Turnstile（已处理，无需再 wait_for_challenge）。
     # 若 5 次都失败，刷新页面重试一次（Chrome profile 保留首访信息，二次加载常更容易过 CF）
@@ -643,6 +647,7 @@ def browser_login(page, account):
         try:
             page.get(LOGIN_PAGE)
             wait_page(page, 2)
+            _wait_page_settled(page, 90)
         except Exception as e:
             log(f"⚠️ 刷新失败: {e}")
         if not handle_turnstile(page):
@@ -795,6 +800,8 @@ def open_game(page, account_name):
     # 页面 JS 种的会话状态，会导致后续期限读取失败）。已过盾后加载只需数秒。
     page.get(jump_url)
     wait_page(page, 2)
+    # eager 下先等面板 DOM 落定再探一次性表单，防页面未长完就误判无表单
+    _wait_page_settled(page, 60)
 
     if not wait_for_challenge(page, account_name):
         return False
