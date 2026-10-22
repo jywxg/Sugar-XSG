@@ -12,7 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "20261022c"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
+SCRIPT_VERSION = "20261022d"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -49,8 +49,10 @@ for item in re.split(r"[\n;]+", XSERVER_GAME_ACCOUNT.strip()):
         "password": parts[2].strip(),
     })
 
+_T0 = time.time()  # 进程内计时起点（20261022d）：日志行首 [+Ns]，定位哪段吃时间用
+
 def log(msg):
-    print(msg, flush=True)
+    print(f"[+{int(time.time() - _T0):>4d}s] {msg}", flush=True)
 
 def divider(label):
     log("=" * 20 + f" {label} " + "=" * 20)
@@ -232,6 +234,12 @@ def build_options(profile=None, use_proxy=True):
     # base=120 只兜底「元素终会出现」的等待；凡是探「元素不存在」的探针
     # （find_*、登录后密码框判定等）必须传显式短 timeout，否则每次等满 120s（1011o 修）
     co.set_timeouts(base=120, page_load=120, script=60)
+    # 导航不等 load 事件（20261022d）：默认 normal 下 page.get 要等 readyState=complete
+    # 才返回（DrissionPage _wait_loaded 源码确认）；子资源经代理挂起时每次导航吃满
+    # page_load=120s（2026-10-22 实测：开局登录页卡约 2 分钟、登录后 jumpvps 再卡）。
+    # eager 只等文档解析完（interactive），后续就绪判断本来就由签名落定 + 元素
+    # 探针负责，不依赖 load 事件。
+    co.set_load_mode("eager")
 
     return co
 
