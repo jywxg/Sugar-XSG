@@ -12,6 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
+SCRIPT_VERSION = "1011n"  # 每次改版同步递增；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -1310,6 +1311,7 @@ def run_account(page, account):
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
 def main():
+    log(f"🚀 脚本版本: {SCRIPT_VERSION}")
     failed = 0
     results = []
 
