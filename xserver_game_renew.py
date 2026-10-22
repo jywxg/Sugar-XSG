@@ -49,7 +49,7 @@ for item in re.split(r"[\n;]+", XSERVER_GAME_ACCOUNT.strip()):
     })
 
 def log(msg):
-    print(msg, flush=True)
+    print(f"[{get_cst_time().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def divider(label):
     log("=" * 20 + f" {label} " + "=" * 20)
@@ -1248,7 +1248,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261022h"  # 基于用户上传的 -2 版修改：只治第二点（登录后段）延时
+SCRIPT_VERSION = "20261022i"  # 基于用户上传的 -2 版：h 治第二点延时；i 加日志墙钟时间戳
 
 
 def main():
