@@ -12,7 +12,7 @@ from pathlib import Path
 from curl_cffi import requests as curl_requests
 from DrissionPage import ChromiumOptions, ChromiumPage
 
-SCRIPT_VERSION = "20261022b"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
+SCRIPT_VERSION = "20261022c"  # 版本号规则（2026-10-22 定）：当前日期 YYYYMMDD + 当日字母序号（a/b/c…）；启动日志会打印，用于确认仓库里跑的到底是哪一版
 BASE_URL = "https://secure.xserver.ne.jp"
 LOGIN_PAGE = f"{BASE_URL}/xapanel/login/xmgame"
 XMGAME_INDEX_URL = f"{BASE_URL}/xapanel/xmgame/index"
@@ -243,25 +243,40 @@ def wait_page(page, seconds=2):
     time.sleep(seconds)
 
 def _wait_page_settled(page, timeout=90):
-    """等页面加载彻底落定（readyState=complete 且稳定 2 秒）后返回。
+    """等页面加载落定后返回：页面签名（readyState|URL|body 长度）稳定 2 秒即算落定。
 
     站点变慢适配（2026-10-22）：Turnstile 通过后 CF 常整页刷新一次发 clearance，
     刷新没落定就取元素/填表会抛 "The page is refreshed"（1011k 实测死点：
     找到 uniqid 后填表时页面刷新、元素引用失效）。超时也不阻塞流程，尽力而为。
+
+    落定条件放宽（20261022c）：旧版要求 readyState=complete，但登录后面板页
+    常有子资源经代理长期挂起、readyState 永远到不了 complete，每次把 90 秒
+    等满才继续（2026-10-22 实测"浏览器登录完成"后卡约 90 秒）。改看签名：
+    CF 刷新会改 URL/DOM 长度、HTML 还在流入时长度持续增长，签名一变就重置
+    稳定计时，防刷新与防抢跑的保护不变；DOM 已终态、只剩子资源挂起时，
+    约 3 秒即可判定落定。
     """
     end = time.time() + timeout
     stable_since = None
+    last_sig = None
     while time.time() < end:
         try:
-            state = page.run_js("return document.readyState")
+            sig = page.run_js(
+                "return document.readyState + '|' + location.href + '|' + "
+                "(document.body ? document.body.innerHTML.length : 0)")
         except Exception:
-            state = None
-        if state == "complete":
-            if stable_since is None:
-                stable_since = time.time()
-            elif time.time() - stable_since >= 2:
-                return True
+            sig = None
+        if sig is not None and not sig.startswith("loading"):
+            if sig == last_sig:
+                if stable_since is None:
+                    stable_since = time.time()
+                elif time.time() - stable_since >= 2:
+                    return True
+            else:
+                last_sig = sig
+                stable_since = None
         else:
+            last_sig = None
             stable_since = None
         time.sleep(1)
     return False
