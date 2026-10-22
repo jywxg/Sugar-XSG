@@ -185,7 +185,7 @@ def _proxy_alive():
     try:
         r = curl_requests.get(LOGIN_PAGE,
                               proxies={"http": proxy, "https": proxy},
-                              impersonate="chrome", timeout=10)
+                              impersonate="chrome", timeout=60)
         log(f"🔍 代理探测: 登录页 → HTTP {r.status_code}")
         return bool(r.ok)
     except Exception as e:
@@ -224,6 +224,9 @@ def build_options(profile=None, use_proxy=True):
     if ua:
         co.set_argument(f"--user-agent={ua}")
         log(f"🌐 Chrome UA: {ua[:80]}...")
+
+    # 站点变慢适配（2026-10-22）：页面加载/脚本超时放宽，避免 20s+ 首字节下误杀
+    co.set_timeouts(page_load=120, script=60)
 
     return co
 
@@ -461,7 +464,7 @@ def handle_turnstile(page):
         # （2026-10-11 教训：曾尝试首轮短轮询 10 秒"快速失败"，但若第一次点击启动
         # 的是个慢挑战，10 秒掐断重点击可能打断它，导致连挂；已回滚为统一 30 秒。
         # 不对称风险：短轮询最多省 20 秒，打断的代价是 5 连挂。）
-        poll_seconds = int(os.getenv("TURNSTILE_TOKEN_POLL_SECONDS", "30"))
+        poll_seconds = int(os.getenv("TURNSTILE_TOKEN_POLL_SECONDS", "120"))
         token = ""
         for _ in range(poll_seconds):
             token = _get_turnstile_token(page)
@@ -514,7 +517,7 @@ def wait_for_challenge(page, account_name):
     log("ℹ️ 本程序不会破解或绕过验证码。")
     log("ℹ️ 如果挑战能由正常浏览器自动完成，将继续等待。")
 
-    timeout = int(os.getenv("TURNSTILE_WAIT_SECONDS", "45"))
+    timeout = int(os.getenv("TURNSTILE_WAIT_SECONDS", "120"))
     end = time.time() + timeout
     clicks = 0            # 已点击次数（最多 3 次）
     last_click_at = 0.0   # 上次点击时间戳
@@ -832,7 +835,7 @@ def _init_http_cookies(page):
             pass
 
 
-def _http_request(method, url, *, data=None, headers=None, timeout=20):
+def _http_request(method, url, *, data=None, headers=None, timeout=90):
     """函数式 curl_cffi 请求（每请求独立 TLS 指纹，无 jar 干扰）+ 自维护 cookie。
 
     代理失效回退：走代理时连接层抛异常 → 标记代理死亡 → 清除代理直连重试一次；
@@ -936,9 +939,9 @@ def _renew_step(session, method, url, label, headers, data=None, proxies=None,
     cf_msg: CF 拦截时的自定义日志；不传则用默认格式。
     """
     if method == "GET":
-        r = _request_proxy_fallback(session, "GET", url, headers=headers, timeout=20, proxies=proxies)
+        r = _request_proxy_fallback(session, "GET", url, headers=headers, timeout=90, proxies=proxies)
     else:
-        r = _request_proxy_fallback(session, "POST", url, headers=headers, data=data, timeout=20, proxies=proxies)
+        r = _request_proxy_fallback(session, "POST", url, headers=headers, data=data, timeout=90, proxies=proxies)
     r.encoding = "EUC-JP"
     if merge_cf:
         if not r.ok or _resp_blocked_by_cf(r.text):
