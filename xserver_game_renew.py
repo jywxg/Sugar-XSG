@@ -584,10 +584,59 @@ def click_first_action(page):
         pass
     return False
 
+def wait_login_ready(page, budget=None):
+    """慢站适配：导航返回不等于登录表单已渲染（2026-10-23 晨实测页面数分钟仍空白）。
+    轮询等 memberid 输入框出现，最长 budget 秒（LOGIN_READY_WAIT_SECONDS 可调，默认 240），
+    每 30 秒报一次已等时长。若文档已 complete 且持续 45 秒无表单、无挑战痕迹，
+    判定为坏页（维护页等）提前结束，不空烧整个预算。"""
+    if budget is None:
+        budget = int(os.environ.get("LOGIN_READY_WAIT_SECONDS", "240"))
+    start = time.time()
+    empty_complete_since = None
+    last_heartbeat = 0
+    while time.time() - start < budget:
+        try:
+            if page.ele('css:input[name="memberid"]', timeout=2):
+                return True
+        except Exception:
+            pass
+        try:
+            state = page.run_js(
+                "return [document.readyState, !!document.querySelector("
+                "'.cf-turnstile, [data-sitekey], iframe[src*=\"challenges.cloudflare.com\"]')];"
+            )
+            complete = bool(state) and state[0] == "complete"
+            challenged = bool(state) and bool(state[1])
+        except Exception:
+            complete, challenged = False, False
+        if complete and not challenged:
+            if empty_complete_since is None:
+                empty_complete_since = time.time()
+            elif time.time() - empty_complete_since >= 45:
+                log("⚠️ 页面已加载完成但持续无登录表单，判定为坏页")
+                return False
+        else:
+            empty_complete_since = None
+        waited = int(time.time() - start)
+        if waited - last_heartbeat >= 30:
+            last_heartbeat = waited
+            log(f"⏳ 登录页仍在加载，已等 {waited} 秒…")
+        time.sleep(5)
+    try:
+        return bool(page.ele('css:input[name="memberid"]', timeout=2))
+    except Exception:
+        return False
+
+
 def browser_login(page, account):
     divider(f"登录 {account['name']}")
     page.get(LOGIN_PAGE)
     wait_page(page, 2)
+
+    if not wait_login_ready(page):
+        save_debug(page, account["name"], "login_page_not_ready")
+        log("❌ 登录页长时间未渲染出表单")
+        return False
 
     # xmgame 需要手动点 Turnstile（已处理，无需再 wait_for_challenge）。
     # 若 5 次都失败，刷新页面重试一次（Chrome profile 保留首访信息，二次加载常更容易过 CF）
@@ -598,6 +647,10 @@ def browser_login(page, account):
             wait_page(page, 2)
         except Exception as e:
             log(f"⚠️ 刷新失败: {e}")
+        if not wait_login_ready(page):
+            save_debug(page, account["name"], "login_page_not_ready")
+            log("❌ 登录页长时间未渲染出表单")
+            return False
         if not handle_turnstile(page):
             log("❌ Turnstile 未通过（重试后仍失败）")
             return False
@@ -1255,7 +1308,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261023a"  # i 版 + 总用时收尾：日志末尾一行、TG 同步带版本与总用时
+SCRIPT_VERSION = "20261023b"  # a 版 + 慢站适配：登录页渲染就绪等待（默认 240s，LOGIN_READY_WAIT_SECONDS 可调）
 
 
 def main():
