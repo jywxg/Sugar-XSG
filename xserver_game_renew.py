@@ -589,6 +589,23 @@ def click_first_action(page):
         pass
     return False
 
+def is_busy_page(page):
+    """官网拥挤页（busy.php）：访问集中时管理画面会被顶替成这张页，
+    页面本身即要求稍后再试。URL 或标题/正文命中「アクセスが集中」即判定。"""
+    try:
+        if "busy.php" in (page.url or "").lower():
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(page.run_js(
+            "return document.title.includes('アクセスが集中') || "
+            "(document.body && document.body.innerText.includes('アクセスが集中'));"
+        ))
+    except Exception:
+        return False
+
+
 def wait_login_ready(page, budget=None):
     """慢站适配：导航返回不等于登录表单已渲染（2026-10-23 晨实测页面数分钟仍空白）。
     轮询等 memberid 输入框出现，最长 budget 秒（LOGIN_READY_WAIT_SECONDS 可调，默认 240），
@@ -599,12 +616,29 @@ def wait_login_ready(page, budget=None):
     start = time.time()
     empty_complete_since = None
     last_heartbeat = 0
+    busy_since = None
     while time.time() - start < budget:
         try:
             if page.ele('css:input[name="memberid"]', timeout=2):
                 return True
         except Exception:
             pass
+        if is_busy_page(page):
+            # 拥挤页是官方限流，不是坏页：不走 complete 早停，持续 45 秒重载一次
+            empty_complete_since = None
+            if busy_since is None:
+                busy_since = time.time()
+                log("🚧 登录页被官网拥挤页（busy）顶替，等待后重载…")
+            elif time.time() - busy_since >= 45:
+                busy_since = None
+                try:
+                    page.get(LOGIN_PAGE)
+                    wait_page(page, 2)
+                except Exception:
+                    pass
+            time.sleep(5)
+            continue
+        busy_since = None
         try:
             state = page.run_js(
                 "return [document.readyState, !!document.querySelector("
@@ -857,8 +891,28 @@ def read_info(page):
     if not wait_for_challenge(page, "game-info"):
         return None
 
-    html = page.html or ""
-    return parse_remaining(html)
+    try:
+        html = page.html or ""
+    except Exception:
+        html = ""
+    info = parse_remaining(html)
+    # 期限页被拥挤页顶替时解析必然失败：按官网要求等 60 秒重载，最多 3 次
+    busy_tries = 0
+    while (info is None or (info[0] < 0 and info[1] < 0 and not info[3])) \
+            and busy_tries < 3 and is_busy_page(page):
+        busy_tries += 1
+        log(f"🚧 期限页被官网拥挤页（busy）顶替，等待 60 秒后重载（第 {busy_tries} 次）…")
+        time.sleep(60)
+        page.get(INFO_URL)
+        wait_page(page, 2)
+        if not wait_for_challenge(page, "game-info"):
+            return None
+        try:
+            html = page.html or ""
+        except Exception:
+            html = ""
+        info = parse_remaining(html)
+    return info
 
 def get_browser_ua(page):
     """从当前浏览器读取真实 UA，保证后续 requests 与浏览器指纹一致（避免 CF 二次验证）"""
@@ -1335,7 +1389,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261023c"  # b 版 + 提交后落定等待（默认 150s，LOGIN_SETTLE_WAIT_SECONDS 可调）+ CF 探测读 HTML 加固
+SCRIPT_VERSION = "20261023d"  # c 版 + 官网拥挤页（busy.php）识别与等待重试：登录就绪等待、期限页读取两处接入
 
 
 def main():
