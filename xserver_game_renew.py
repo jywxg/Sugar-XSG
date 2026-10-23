@@ -62,6 +62,11 @@ def get_cst_time():
 def now_str():
     return get_cst_time().strftime("%Y-%m-%d %H:%M:%S")
 
+
+def _fmt_elapsed(seconds):
+    s = int(seconds)
+    return f"{s // 60} 分 {s % 60} 秒" if s >= 60 else f"{s} 秒"
+
 def get_exact_cst_time(h, m):
     if h < 0:
         return "未知"
@@ -1126,7 +1131,7 @@ def check_ip_info():
         _IP_INFO_CACHE = ("未知", "未知")
     return _IP_INFO_CACHE
 
-def notify_tg(name, result, raw_dl, cst_dl, remaining, cf_info):
+def notify_tg(name, result, raw_dl, cst_dl, remaining, cf_info, elapsed="未知"):
     if not TG_BOT:
         return
     parts = TG_BOT.split(",", 1)
@@ -1147,6 +1152,8 @@ def notify_tg(name, result, raw_dl, cst_dl, remaining, cf_info):
         f"☁️ CF Cron: {cf_info.get('status', '未知')}\n"
         f"⚙️ CRON: {cf_info.get('cron', '未知')}\n"
         f"🕐 执行时间: {now_str()}\n"
+        f"⏱ 总用时: {elapsed}\n"
+        f"🚀 脚本版本: {SCRIPT_VERSION}\n"
         "━━━━━━━━━━━━━━━━━━"
     )
     try:
@@ -1248,10 +1255,11 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261022i"  # 基于用户上传的 -2 版：h 治第二点延时；i 加日志墙钟时间戳
+SCRIPT_VERSION = "20261023a"  # i 版 + 总用时收尾：日志末尾一行、TG 同步带版本与总用时
 
 
 def main():
+    t0 = time.time()
     log(f"🚀 脚本版本: {SCRIPT_VERSION}")
     failed = 0
     results = []
@@ -1317,9 +1325,11 @@ def main():
         cf = update_cf_cron(minutes // 60, minutes % 60)
 
     cf_info = {"status": cf[1], "cron": cf[2], "cst": cf[3]}
+    elapsed = _fmt_elapsed(time.time() - t0)
     for account, result in results:
-        notify_tg(account["name"], result[1], result[2], result[3], result[4], cf_info)
+        notify_tg(account["name"], result[1], result[2], result[3], result[4], cf_info, elapsed)
 
+    log(f"⏱ 总用时: {elapsed}")
     sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":
