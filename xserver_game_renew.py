@@ -290,7 +290,12 @@ def save_debug(page, account_name, reason):
     )
 
 def looks_like_cloudflare(page):
-    text = (page.html or "").lower()
+    try:
+        text = (page.html or "").lower()
+    except Exception:
+        # 慢站下渲染器可能卡死，读 HTML 的 CDP 调用会超时抛错（2026-10-23 12:00 轮实测）：
+        # 读不到不等于 CF 页，按无标记处理，别让探测把整个账号打成致命异常。
+        text = ""
     title = ""
     try:
         title = (page.title or "").lower()
@@ -691,15 +696,37 @@ def browser_login(page, account):
     # 登录成功的标志：URL 离开 login 路径（进入 xapanel/myaccount 等），
     # 且页面不再有密码输入框。原逻辑要求 URL 同时含 login 和 myaccount，
     # 两个条件矛盾，实际上永远不会触发，形同虚设。
-    still_on_login = "/xapanel/login" in page.url.lower()
-    has_password_field = False
-    try:
-        has_password_field = bool(page.ele('css:input[name="user_password"]'))
-    except Exception:
-        pass
+    # 慢站适配：提交后后端可能长时间不响应、页面卡住读不到（CDP 超时），
+    # 瞬时判定会冤杀慢登录：轮询等页面落定，最长 LOGIN_SETTLE_WAIT_SECONDS
+    # 秒（默认 150），期间读不到一律按未落定继续等，每 30 秒报一次进度。
+    settle_budget = int(os.environ.get("LOGIN_SETTLE_WAIT_SECONDS", "150"))
+    settle_start = time.time()
+    settle_heartbeat = 0
+    still_on_login = True
+    has_password_field = True
+    last_url = ""
+    while True:
+        try:
+            last_url = page.url or ""
+            still_on_login = "/xapanel/login" in last_url.lower()
+        except Exception:
+            still_on_login = True
+        try:
+            has_password_field = bool(page.ele('css:input[name="user_password"]', timeout=2))
+        except Exception:
+            has_password_field = True
+        if not still_on_login and not has_password_field:
+            break
+        waited = time.time() - settle_start
+        if waited >= settle_budget:
+            break
+        if waited - settle_heartbeat >= 30:
+            settle_heartbeat = waited
+            log(f"⏳ 登录提交后等待页面落定，已等 {int(waited)} 秒…")
+        time.sleep(5)
     if still_on_login or has_password_field:
         save_debug(page, account["name"], "login_may_have_failed")
-        log(f"❌ 登录后仍停留在登录页面（URL: {page.url}）")
+        log(f"❌ 登录后仍停留在登录页面（URL: {last_url}）")
         return False
 
     log("✅ 浏览器登录完成")
@@ -1308,7 +1335,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261023b"  # a 版 + 慢站适配：登录页渲染就绪等待（默认 240s，LOGIN_READY_WAIT_SECONDS 可调）
+SCRIPT_VERSION = "20261023c"  # b 版 + 提交后落定等待（默认 150s，LOGIN_SETTLE_WAIT_SECONDS 可调）+ CF 探测读 HTML 加固
 
 
 def main():
