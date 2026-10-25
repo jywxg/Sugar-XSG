@@ -1283,8 +1283,8 @@ def notify_tg(name, result, raw_dl, cst_dl, remaining, cf_info, elapsed="未知"
         f"⏳ 剩余: {remaining}\n"
         f"📊 结果: {result}\n"
         f"🌐 IP: {proxy_ip} ({proxy_country})\n"
-        f"☁️ CF Cron: {cf_info.get('status', '未知')}\n"
-        f"⚙️ CRON: {cf_info.get('cron', '未知')}\n"
+        f"☁️ CF Cron: {cf_info.get('status', '未知')} {cf_info.get('cron', '未知')}\n"
+        f"⏰ 下次执行时间：{cf_info.get('cst', '未知')}\n"
         f"🕐 执行时间: {now_str()}\n"
         f"⏱ 总用时: {elapsed}\n"
         f"🚀 脚本版本: {SCRIPT_VERSION}\n"
@@ -1389,7 +1389,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261025d"  # c 版 + 删除文件末尾多余空行
+SCRIPT_VERSION = "20261025e"  # d 版 + TG 通知：cron 表达式并入 CF Cron 行、新增 ⏰ 下次执行时间行
 
 
 def main():
