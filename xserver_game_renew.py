@@ -52,7 +52,7 @@ def log(msg):
     print(f"[{get_cst_time().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def divider(label):
-    log("=" * 20 + f" {label} " + "=" * 20)
+    log(label)
 
 def get_cst_time():
     return datetime.datetime.now(datetime.timezone.utc).astimezone(
@@ -668,7 +668,7 @@ def wait_login_ready(page, budget=None):
 
 
 def browser_login(page, account):
-    divider(f"登录 {account['name']}")
+    divider(f"登录 {account['name']} 服务器")
     page.get(LOGIN_PAGE)
     wait_page(page, 2)
 
@@ -1308,7 +1308,7 @@ def run_account(page, account):
     _HTTP_INIT = False  # 每个账号独立 cookie/UA，避免账号间交叉
     _HTTP_COOKIES = {}
     _HTTP_UA = ""
-    divider(account["name"])
+    divider(f"处理 {account['name']} 服务器")
 
     if not browser_login(page, account):
         NEXT_RUN_MINUTES.append(-1)  # 登录失败多半是瞬时问题，2 小时兜底重试，不按其他账号剩余时间排期
@@ -1389,12 +1389,15 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261023d"  # c 版 + 官网拥挤页（busy.php）识别与等待重试：登录就绪等待、期限页读取两处接入
+SCRIPT_VERSION = "20261025b"  # a 版 + 分段标题去掉 = 号，第一行改「处理 X 服务器」、第二行改「登录 X 服务器」
 
 
 def main():
     t0 = time.time()
-    log(f"🚀 脚本版本: {SCRIPT_VERSION}")
+    print("##############################", flush=True)
+    print("   XServer 游戏服务器自动续期", flush=True)
+    print(f"   脚本版本: {SCRIPT_VERSION}", flush=True)
+    print("##############################", flush=True)
     failed = 0
     results = []
 
