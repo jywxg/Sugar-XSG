@@ -79,10 +79,7 @@ jobs:
 
       - name: Run XServer browser renewal
         shell: bash
-        run: |
-          xvfb-run -a \
-            -s "-screen 0 1920x1080x24" \
-            python xserver_game_renew.py
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python xserver_game_renew.py
 
       - name: Update run record
         if: always()
