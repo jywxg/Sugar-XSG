@@ -1389,7 +1389,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261025c"  # b 版 + 两行分段标题加图标（🖥️ 处理 / 🔐 登录）
+SCRIPT_VERSION = "20261025d"  # c 版 + 删除文件末尾多余空行
 
 
 def main():
@@ -1471,4 +1471,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
