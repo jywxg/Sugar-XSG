@@ -423,7 +423,7 @@ def handle_turnstile(page):
         return True
 
     miss_streak = 0  # 连续找不到容器的次数；连续 2 次直接走失败路径（省最坏 45s/账号）
-    for attempt in range(5):
+    for attempt in range(3):
         if attempt > 0 and _get_turnstile_token(page):
             # 上一轮点击可能已生效只是 token 来得慢：先确认，避免对已验证的 widget 重复点击
             log("✅ Turnstile 验证通过")
@@ -501,7 +501,7 @@ def handle_turnstile(page):
 
         log(f"⏳ 第 {attempt+1} 次轮询未通过，重试...")
 
-    log("❌ Turnstile 5 次均未通过")
+    log("❌ Turnstile 3 次均未通过")
     try:
         debug_dir = os.getenv("DEBUG_DIR", "./debug")
         os.makedirs(debug_dir, exist_ok=True)
@@ -678,7 +678,7 @@ def browser_login(page, account):
         return False
 
     # 打开页面后先刷新一次：首访已把 CF cookie/会话种进 Chrome profile，
-    # 二次加载以回访者身份进入、更容易过 Turnstile（2026-11-04 定，替代原失败后刷新兜底）
+    # 二次加载以回访者身份进入、更容易过 Turnstile（2026-11-04 定）
     log("🔄 登录页预刷新一次（二次加载更容易过 CF）...")
     try:
         page.get(LOGIN_PAGE)
@@ -691,9 +691,21 @@ def browser_login(page, account):
         return False
 
     # xmgame 需要手动点 Turnstile（已处理，无需再 wait_for_challenge）。
+    # 每轮最多 3 次；3 次不过多半是坏抽签会话，兜底刷新一次换会话再试一轮。
     if not handle_turnstile(page):
-        log("❌ Turnstile 未通过")
-        return False
+        log("🔄 Turnstile 3 次未通过，兜底刷新一次...")
+        try:
+            page.get(LOGIN_PAGE)
+            wait_page(page, 2)
+        except Exception as e:
+            log(f"⚠️ 兜底刷新失败: {e}")
+        if not wait_login_ready(page):
+            save_debug(page, account["name"], "login_page_not_ready")
+            log("❌ 登录页长时间未渲染出表单")
+            return False
+        if not handle_turnstile(page):
+            log("❌ Turnstile 未通过（兜底刷新后仍失败）")
+            return False
 
     uniqid = find_input(page, "uniqid")
     memberid = find_input(page, "memberid")
@@ -1390,7 +1402,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261104a"  # 登录页打开后预刷新一次再过 Turnstile，删除原失败后刷新兜底
+SCRIPT_VERSION = "20261104b"  # a 版预刷新 + 每轮尝试上限 5→3、3 次不过兜底刷新一次再试一轮
 
 
 def main():
