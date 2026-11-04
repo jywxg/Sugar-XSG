@@ -677,22 +677,23 @@ def browser_login(page, account):
         log("❌ 登录页长时间未渲染出表单")
         return False
 
+    # 打开页面后先刷新一次：首访已把 CF cookie/会话种进 Chrome profile，
+    # 二次加载以回访者身份进入、更容易过 Turnstile（2026-11-04 定，替代原失败后刷新兜底）
+    log("🔄 登录页预刷新一次（二次加载更容易过 CF）...")
+    try:
+        page.get(LOGIN_PAGE)
+        wait_page(page, 2)
+    except Exception as e:
+        log(f"⚠️ 预刷新失败: {e}")
+    if not wait_login_ready(page):
+        save_debug(page, account["name"], "login_page_not_ready")
+        log("❌ 登录页长时间未渲染出表单")
+        return False
+
     # xmgame 需要手动点 Turnstile（已处理，无需再 wait_for_challenge）。
-    # 若 5 次都失败，刷新页面重试一次（Chrome profile 保留首访信息，二次加载常更容易过 CF）
     if not handle_turnstile(page):
-        log("🔄 Turnstile 未通过，刷新页面重试一次...")
-        try:
-            page.get(LOGIN_PAGE)
-            wait_page(page, 2)
-        except Exception as e:
-            log(f"⚠️ 刷新失败: {e}")
-        if not wait_login_ready(page):
-            save_debug(page, account["name"], "login_page_not_ready")
-            log("❌ 登录页长时间未渲染出表单")
-            return False
-        if not handle_turnstile(page):
-            log("❌ Turnstile 未通过（重试后仍失败）")
-            return False
+        log("❌ Turnstile 未通过")
+        return False
 
     uniqid = find_input(page, "uniqid")
     memberid = find_input(page, "memberid")
@@ -1389,7 +1390,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261025e"  # d 版 + TG 通知：cron 表达式并入 CF Cron 行、新增 ⏰ 下次执行时间行
+SCRIPT_VERSION = "20261104a"  # 登录页打开后预刷新一次再过 Turnstile，删除原失败后刷新兜底
 
 
 def main():
