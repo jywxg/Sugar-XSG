@@ -181,7 +181,7 @@ def _dump_extend_debug(page_html):
             ("登录字样", any(m in html for m in ("ログイン", "ログアウト", "login_token"))),
             ("CF挑战标记", any(m in html.lower() for m in ("just a moment", "cf-chl-", "turnstile", "checking your browser"))),
         ]
-        log(f"🧪 [调试] 延长页长度 {len(html)} 字符；标记命中: " +
+        log(f"🧪 [调试] 延长页长度 {len(html)} 字符（解码 {_LAST_PAGE_ENCODING or '未知'}）；标记命中: " +
             "、".join(f"{name}={'有' if hit else '无'}" for name, hit in checks))
         text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", html, flags=re.IGNORECASE)
         text = re.sub(r"<[^>]+>", " ", text)
@@ -1111,9 +1111,38 @@ def _request_proxy_fallback(session, method, url, *, retries=2, **kwargs):
         return _request_retry(session, method, url, retries=1, **kwargs)
 
 
+# 最近一次续期页面的实际解码编码（_fix_response_encoding 写入，调试输出用）
+_LAST_PAGE_ENCODING = ""
+
+
+def _fix_response_encoding(r):
+    """按页面字节定解码编码，不再写死 EUC-JP。
+
+    站点页面已改 UTF-8，写死 EUC-JP 会把日文解成乱码，can_renew 的日文标记
+    （延長／残り契約時間／ログイン）随之全部失效（20261125a 实测：延长页判 None、
+    调试摘录全是乱码）。依次用 utf-8 / euc-jp / shift_jis 严格解码 r.content，
+    第一个能无错解出的就是页面真实编码；都失败时兜底 utf-8。
+    """
+    global _LAST_PAGE_ENCODING
+    try:
+        raw = r.content or b""
+    except Exception:
+        raw = b""
+    for enc in ("utf-8", "euc-jp", "shift_jis"):
+        try:
+            raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        r.encoding = enc
+        _LAST_PAGE_ENCODING = enc
+        return
+    r.encoding = "utf-8"
+    _LAST_PAGE_ENCODING = "utf-8(兜底)"
+
+
 def _renew_step(session, method, url, label, headers, data=None, proxies=None,
                 merge_cf=False, cf_msg=None):
-    """续期流程通用一步：fallback 请求 → EUC-JP 编码 → 状态/CF 检查。
+    """续期流程通用一步：fallback 请求 → 按字节定编码 → 状态/CF 检查。
 
     成功返回 response；失败打日志并返回 None（调用方直接 return False）。
     请求异常（直连也失败）直接抛出，由 submit_renewal 的 except 统一处理（与原行为一致）。
@@ -1125,7 +1154,7 @@ def _renew_step(session, method, url, label, headers, data=None, proxies=None,
         r = _request_proxy_fallback(session, "GET", url, headers=headers, timeout=20, proxies=proxies)
     else:
         r = _request_proxy_fallback(session, "POST", url, headers=headers, data=data, timeout=20, proxies=proxies)
-    r.encoding = "EUC-JP"
+    _fix_response_encoding(r)
     if merge_cf:
         if not r.ok or _resp_blocked_by_cf(r.text):
             log(f"❌ [续期] {label}异常 HTTP {r.status_code}")
@@ -1435,7 +1464,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261125a"  # 延长页判 None 时加调试输出：标记命中清单+可见文本摘录+原文存 extend_page_debug.html
+SCRIPT_VERSION = "20261125b"  # 修编码：站点页面已改 UTF-8，_renew_step 不再写死 EUC-JP，改按字节自动定编码（utf-8/euc-jp/shift_jis 严格解码探测）；调试行带解码编码
 
 
 def main():
