@@ -164,6 +164,38 @@ def can_renew(page_html):
         return True
     return None
 
+def _dump_extend_debug(page_html):
+    """延长页被 can_renew 判 None 时输出调试信息，帮助定位页面结构变化。
+
+    逐项列出 can_renew 的判定标记命中情况、页面可见文本摘录，
+    并把页面原文存到 extend_page_debug.html（Actions 环境随运行结束丢失，
+    主要靠日志摘录定位；本地运行时可直接看该文件）。
+    """
+    try:
+        html = page_html or ""
+        checks = [
+            ("period字段", bool(re.search(r'name=["\']period["\']', html, re.IGNORECASE))),
+            ("延長字样", "延長" in html),
+            ("extend动作名", "action_game_freeplan_extend" in html),
+            ("未到窗口文案", "残り契約時間が4時間を切るまで" in html),
+            ("登录字样", any(m in html for m in ("ログイン", "ログアウト", "login_token"))),
+            ("CF挑战标记", any(m in html.lower() for m in ("just a moment", "cf-chl-", "turnstile", "checking your browser"))),
+        ]
+        log(f"🧪 [调试] 延长页长度 {len(html)} 字符；标记命中: " +
+            "、".join(f"{name}={'有' if hit else '无'}" for name, hit in checks))
+        text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", html, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        log(f"🧪 [调试] 延长页可见文本摘录: {text[:1200]}")
+        try:
+            Path("extend_page_debug.html").write_text(html, encoding="utf-8")
+            log("🧪 [调试] 延长页原文已存 extend_page_debug.html")
+        except Exception as e:
+            log(f"🧪 [调试] 延长页原文保存失败: {e}")
+    except Exception as e:
+        log(f"🧪 [调试] 延长页调试输出失败: {e}")
+
+
 def get_proxy():
     proxy = os.getenv("BROWSER_PROXY") or os.getenv("PROXY_HTTP_SERVER") or ""
     return proxy.strip()
@@ -1151,6 +1183,7 @@ def submit_renewal(page, account_name):
             log("⌛️ 当前仍未进入可续期窗口")
             return None
         if eligibility is None:
+            _dump_extend_debug(r.text)
             log("❌ [续期] 延长页结构异常或状态无法判断，停止提交以避免误操作")
             return False
         log("🔄 [续期] 可续期，GET 续期输入页...")
@@ -1402,7 +1435,7 @@ def run_account(page, account):
     log(f"⏳ 续期后剩余: {remaining_after}")
     return False, "❌ 续期后期限未变化（已重试）", dl_after or dl_before, cst_after, remaining_after
 
-SCRIPT_VERSION = "20261104b"  # a 版预刷新 + 每轮尝试上限 5→3、3 次不过兜底刷新一次再试一轮
+SCRIPT_VERSION = "20261125a"  # 延长页判 None 时加调试输出：标记命中清单+可见文本摘录+原文存 extend_page_debug.html
 
 
 def main():
